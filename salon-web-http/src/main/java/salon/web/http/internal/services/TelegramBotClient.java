@@ -14,9 +14,17 @@ public interface TelegramBotClient {
 
   // Simple structural record mapping Telegram's required payload format
   // ИСПРАВЛЕНО: Пишем по стандартам Java (camelCase), но явно маппим в snake_case для Telegram
+  @Json
   record SendMessageDto(
       @Json.Property("chat_id") String chatId,
       String text
+  ) {}
+
+  // ADD THIS STRUCTURAL RECORD: Matches Telegram's setWebhook parameter payload
+  @Json
+  record SetWebhookDto(
+      String url,
+      @Json.Property("secret_token") String secretToken
   ) {}
 
   /**
@@ -27,4 +35,8 @@ public interface TelegramBotClient {
    */
   @Post("/{token}/sendMessage")
   void sendMessage(String token, @Body SendMessageDto payload);
+
+  // ADD THIS DECLARATIVE OUTBOUND PORT: Fires registration payloads to Telegram
+  @Post("/{token}/setWebhook")
+  void setWebhook(String token, @Body SetWebhookDto payload);
 }
