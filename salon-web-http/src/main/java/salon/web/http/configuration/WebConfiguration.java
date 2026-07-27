@@ -1,0 +1,224 @@
+package salon.web.http.configuration;
+
+import io.avaje.config.Config;
+import io.avaje.http.client.HttpClient;
+import io.avaje.http.client.JsonbBodyAdapter;
+import io.avaje.inject.Bean;
+import io.avaje.inject.Factory;
+import io.avaje.jex.Jex;
+import io.avaje.jex.Routing.HttpService;
+import io.avaje.jex.ssl.SslPlugin;
+import io.avaje.jsonb.Jsonb;
+import jakarta.inject.Inject;
+import java.io.File;
+import java.net.URI;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.List;
+import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
+import salon.web.http.internal.services.TelegramVerificationService;
+
+@Factory
+final class WebConfiguration {
+
+  private static final Logger log = LoggerFactory.getLogger(WebConfiguration.class);
+
+  /**
+   * Builds and configures the centralized Jex execution server instance bean.<p> Зависит строго от
+   * абстрактного интерфейса TelegramVerificationService.
+   *
+   * @param httpServices    List of all compile-time processed controller routing endpoints
+   *                        harvested automatically out of the current web module.
+   * @param telegramService Внутренний контракт для проверки подлинности входящих HTTP-запросов от
+   *                        Telegram Bot API.
+   */
+  @Bean
+  @Inject
+  Jex jex(List<HttpService> httpServices, TelegramVerificationService telegramService) {
+    int port = Config.getInt("server.port", 8443);
+    boolean sslEnabled = Config.getBool("server.ssl.enabled", false); // ЧИТАЕМ ФЛАГ ВКЛЮЧЕНИЯ SSL
+
+    Jex jex = Jex.create().port(port);
+
+    // Настраиваем SSL только если свойство server.ssl.enabled=true
+    if (sslEnabled) {
+      String resolvedPath = Config.get("server.ssl.keystorePath", "secret/salon-keystore.p12");
+      String resolvedPassword = Config.get("server.ssl.keystorePassword", "MySecurePassword123");
+
+      var sslPlugin = SslPlugin.create(config -> {
+        if (resolvedPath.startsWith("classpath:")) {
+          String resourceName = resolvedPath.substring("classpath:".length());
+          log.info("[SSL] Testing Profile. Loading embedded classpath stream: '{}'", resourceName);
+          config.keystoreFromClasspath(resourceName, resolvedPassword);
+        } else {
+          String finalPath = null;
+
+          File rawFile = new File(resolvedPath);
+          if (rawFile.isAbsolute() && rawFile.exists() && rawFile.isFile()) {
+            finalPath = rawFile.getAbsolutePath();
+          }
+
+          if (finalPath == null) {
+            String[] potentialRoots = {
+                System.getProperty("app.home"),
+                System.getProperty("user.dir"),
+                "/app"
+            };
+
+            for (String root : potentialRoots) {
+              if (root != null && !root.isBlank()) {
+                Path r1 = Paths.get(root).resolve(resolvedPath);
+                Path r2 = Paths.get(root).resolve("secret").resolve("salon-keystore.p12");
+
+                if (r1.toFile().exists() && r1.toFile().isFile()) {
+                  finalPath = r1.toAbsolutePath().toString();
+                  break;
+                }
+                if (r2.toFile().exists() && r2.toFile().isFile()) {
+                  finalPath = r2.toAbsolutePath().toString();
+                  break;
+                }
+
+                Path parentPath = Paths.get(root).getParent();
+                if (parentPath != null) {
+                  Path r3 = parentPath.resolve(resolvedPath);
+                  if (r3.toFile().exists() && r3.toFile().isFile()) {
+                    finalPath = r3.toAbsolutePath().toString();
+                    break;
+                  }
+                }
+              }
+            }
+          }
+
+          if (finalPath == null) {
+            try {
+              URI jarUri = WebConfiguration.class.getProtectionDomain()
+                  .getCodeSource()
+                  .getLocation()
+                  .toURI();
+              Path jarPath = Paths.get(jarUri);
+
+              if (jarPath.toString().endsWith(".jar")) {
+                Path parent1 = jarPath.getParent();
+                if (parent1 != null) {
+                  Path parent2 = parent1.getParent();
+                  if (parent2 != null) {
+                    Path checkSecret = parent2.resolve("secret").resolve("salon-keystore.p12");
+                    if (checkSecret.toFile().exists()) {
+                      finalPath = checkSecret.toAbsolutePath().toString();
+                    }
+                  }
+                }
+              }
+            } catch (Exception e) {
+              log.debug("ProtectionDomain scanning bypassed", e);
+            }
+          }
+
+          if (finalPath == null) {
+            finalPath = new File(resolvedPath).getAbsolutePath();
+          }
+
+          log.info("[SSL] Production Profile. Resolved absolute file path: '{}'", finalPath);
+
+          File checkFile = new File(finalPath);
+          if (!checkFile.exists() || !checkFile.isFile()) {
+            log.error(
+                "[SSL] FILE MISSING CRITICAL ERROR: Target certificate not found on disk! "
+                    + "Checked: {}",
+                finalPath);
+          }
+
+          config.keystoreFromPath(finalPath, resolvedPassword);
+        }
+      });
+
+      // Подключаем SSL-плагин к серверу Jex
+      jex.plugin(sslPlugin);
+    } else {
+      log.info("[SSL] Сервер Jex запускается по обычному протоколу HTTP (SSL отключен).");
+    }
+
+    // Сквозной Trace ID интерцептор (MDC)
+    jex.before(ctx -> {
+      String traceId = ctx.header("X-Trace-ID");
+      if (traceId == null || traceId.isBlank()) {
+        traceId = "TX-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+      }
+      MDC.put("traceId", traceId);
+    });
+
+    // =====================================================================
+    // ГЛОБАЛЬНЫЙ СЕТЕВОЙ ФИЛЬТР БЕЗОПАСНОСТИ WEBHOOK (Исправленный под сигнатуру Jex)
+    // =====================================================================
+    jex.before(ctx -> {
+      // Точечно перехватываем только POST-запросы на эндпоинт сообщений Telegram
+      if ("POST".equalsIgnoreCase(ctx.method()) && "/api/v1/webhooks/message".equals(ctx.path())) {
+
+        String telegramHeaderToken = ctx.header("X-Telegram-Bot-Api-Secret-Token");
+
+        boolean isAuthorized = telegramService.isValidTelegramRequest(telegramHeaderToken);
+        if (!isAuthorized) {
+          log.warn(
+              "Блокировка на границе сети: Неверный секретный токен вебхука Telegram. Доступ "
+                  + "отклонен.");
+
+          // Мгновенно прерываем цепочку обработки, возвращая 401 Unauthorized
+          ctx.status(401).text("Unauthorized: Invalid webhook secret token source.");
+        }
+      }
+    });
+
+    jex.after(_ -> MDC.clear());
+
+    // Монтируем сгенерированные контроллеры маршрутов
+    httpServices.forEach(jex::routing);
+
+    return jex;
+  }
+
+  /**
+   * Создает базовый HttpClient для исходящих запросов к Telegram. Автоматически настраивает доверие
+   * к сертификатам, если включен SSL. Поскольку наш HttpClient зарегистрирован как полноценный бин
+   * через метод @Bean public HttpClient baseHttpClient(...), нам не нужно закрывать его вручную.
+   * avaje-inject гарантирует его безопасное закрытие на этапе остановки приложения.
+   */
+  @Bean
+  public HttpClient baseHttpClient(Jsonb jsonb) {
+    String baseTargetUrl = Config.get("telegram.api.baseUrl", "https://api.telegram.org");
+    boolean sslEnabled = Config.getBool("server.ssl.enabled", false);
+
+    log.info("Инициализация исходящего шлюза Avaje HttpClient: {}", baseTargetUrl);
+
+    var builder = HttpClient.builder()
+        .baseUrl(baseTargetUrl)
+        .bodyAdapter(new JsonbBodyAdapter(jsonb));
+
+    // ИСПРАВЛЕНО: Если SSL включен (например, для локального прокси или тестирования),
+    // мы можем настроить HttpClient на доверие к нашему хранилищу сертификатов.
+    if (sslEnabled) {
+      log.info("[HttpClient SSL] Настройка безопасного контекста для исходящих вызовов...");
+      try {
+        // В простейшем случае, если мы шлем запросы на официальный https://api.telegram.org,
+        // стандартного SSLContext.getDefault() более чем достаточно.
+        // Но если вам нужно доверять именно САМОПОДПИСАННЫМ сертификатам вашего локального
+        // окружения,
+        // здесь инициализируется SSLContext на основе нашего salon-keystore.p12:
+
+        // javax.net.ssl.SSLContext sslContext = ... (код загрузки нашего хранилища)
+        // builder.sslContext(sslContext);
+
+        // Для официального API Telegram оставляем дефолтный защищенный контекст JVM:
+        builder.sslContext(javax.net.ssl.SSLContext.getDefault());
+      } catch (Exception e) {
+        log.error("Не удалось инициализировать SSLContext для HttpClient: {}", e.getMessage());
+      }
+    }
+
+    return builder.build();
+  }
+}
