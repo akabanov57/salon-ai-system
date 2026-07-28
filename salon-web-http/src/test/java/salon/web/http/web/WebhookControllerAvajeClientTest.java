@@ -44,16 +44,13 @@ class WebhookControllerAvajeClientTest {
         .beans(bookingServiceMock, aiAssistantServiceMock, notificationServiceMock)
         .build();
 
-    Jsonb jsonb = beanScope.get(Jsonb.class);
-
     // 3. Вытаскиваем уже ИДЕАЛЬНО настроенный Jex (с Jsonb, фильтрами и роутами) прямо из DI
     Jex jex = beanScope.get(Jex.class);
-
-    // Запускаем сервер на случайном порту для теста
-    jex.config().port(0);
+    // Jex сконфигурирован. Смотри WebConfiguration.
     server = jex.start();
 
     // 4. Подключаем клиент к порту рантайма
+    Jsonb jsonb = beanScope.get(Jsonb.class);
     httpClient = HttpClient.builder()
         .baseUrl("http://localhost:" + server.port())
         .bodyAdapter(new JsonbBodyAdapter(jsonb))
@@ -63,6 +60,8 @@ class WebhookControllerAvajeClientTest {
   @AfterEach
   void resetMockState() {
     Mockito.reset(bookingServiceMock);
+    Mockito.reset(aiAssistantServiceMock);
+    Mockito.reset(notificationServiceMock);
   }
 
   @AfterAll

@@ -53,7 +53,6 @@ class WebhookControllerTest {
     Jex jex = beanScope.get(Jex.class);
 
     // Запускаем сервер на случайном порту для теста
-    jex.config().port(0);
     server = jex.start();
 
     // 4. Подключаем клиент к порту рантайма
@@ -64,6 +63,8 @@ class WebhookControllerTest {
   @AfterEach
   void resetMockState() {
     Mockito.reset(bookingServiceMock);
+    Mockito.reset(aiAssistantServiceMock);
+    Mockito.reset(notificationServiceMock);
   }
 
   @AfterAll

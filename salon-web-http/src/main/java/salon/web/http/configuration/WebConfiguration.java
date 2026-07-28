@@ -9,7 +9,6 @@ import io.avaje.jex.Jex;
 import io.avaje.jex.Routing.HttpService;
 import io.avaje.jex.ssl.SslPlugin;
 import io.avaje.jsonb.Jsonb;
-import jakarta.inject.Inject;
 import java.io.File;
 import java.net.URI;
 import java.nio.file.Path;
@@ -27,8 +26,11 @@ final class WebConfiguration {
   private static final Logger log = LoggerFactory.getLogger(WebConfiguration.class);
 
   /**
-   * Builds and configures the centralized Jex execution server instance bean.<p> Зависит строго от
-   * абстрактного интерфейса TelegramVerificationService.
+   * Builds and configures the centralized Jex execution server instance bean.
+   * <p>
+   * Зависит строго от абстрактного интерфейса TelegramVerificationService.
+   * <p>
+   * KEEP ONLY @Bean. Strip out any residual @Inject markers completely.
    *
    * @param httpServices    List of all compile-time processed controller routing endpoints
    *                        harvested automatically out of the current web module.
@@ -36,7 +38,6 @@ final class WebConfiguration {
    *                        Telegram Bot API.
    */
   @Bean
-  @Inject
   Jex jex(List<HttpService> httpServices, TelegramVerificationService telegramService) {
     int port = Config.getInt("server.port", 8443);
     boolean sslEnabled = Config.getBool("server.ssl.enabled", false); // ЧИТАЕМ ФЛАГ ВКЛЮЧЕНИЯ SSL
@@ -176,7 +177,7 @@ final class WebConfiguration {
     jex.after(_ -> MDC.clear());
 
     // Монтируем сгенерированные контроллеры маршрутов
-    httpServices.forEach(jex::routing);
+    jex.routing(httpServices);
 
     return jex;
   }
