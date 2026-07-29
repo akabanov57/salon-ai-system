@@ -18,7 +18,7 @@ final class BookingToolsImpl implements BookingTools {
 
   private final BookingService bookingService;
 
-  public BookingToolsImpl(BookingService bookingService) {
+  BookingToolsImpl(BookingService bookingService) {
     this.bookingService = bookingService;
   }
 

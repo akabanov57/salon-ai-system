@@ -1,0 +1,21 @@
+<configuration>
+
+  <!-- Каноничный паттерн вывода логов с поддержкой [%X{traceId}] -->
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [%X{traceId:-NO_TRACE}] %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Логирование нашего веб-компонента и безопасности на уровне DEBUG -->
+  <logger name="salon.web.http" level="DEBUG" />
+
+  <!-- Логирование самого микросерверного движка Jex -->
+  <logger name="io.avaje.jex" level="INFO" />
+
+  <!-- Корневой логгер для сторонних библиотек -->
+  <root level="INFO">
+    <appender-ref ref="STDOUT" />
+  </root>
+
+</configuration>

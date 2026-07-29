@@ -1,0 +1,21 @@
+<configuration>
+
+  <!-- Standardized concise console appender mirroring our web module layout -->
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [%X{traceId:-NO_TRACE}] %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Detailed debugging level for our internal AI orchestrations -->
+  <logger name="salon.ai.engine" level="DEBUG" />
+
+  <!-- Framework prompt/tool execution monitoring (Switch to DEBUG to see full LLM payloads) -->
+  <logger name="dev.langchain4j" level="INFO" />
+
+  <!-- Root logger configuration -->
+  <root level="INFO">
+    <appender-ref ref="STDOUT" />
+  </root>
+
+</configuration>
