@@ -27,9 +27,11 @@ import salon.web.http.web.WebhookController.IncomingMessageDto;
 class WebhookControllerTest {
 
   // Shared static references pinned once for the entire lifecycle footprint
-  private static BookingService bookingServiceMock;
-  private static AiAssistantService aiAssistantServiceMock;
-  private static NotificationService notificationServiceMock;
+  // 1. Создаем мок внешних зависимостей
+  private static final BookingService bookingServiceMock = Mockito.mock(BookingService.class);
+  private static final AiAssistantService aiAssistantServiceMock = Mockito.mock(AiAssistantService.class);
+  private static final NotificationService notificationServiceMock = Mockito.mock(NotificationService.class);
+
   private static BeanScope beanScope;
   private static Server server;
   private static java.net.http.HttpClient httpClient;
@@ -37,11 +39,6 @@ class WebhookControllerTest {
 
   @BeforeAll
   static void startComponent() {
-    // 1. Создаем мок внешних зависимостей
-    bookingServiceMock = Mockito.mock(BookingService.class);
-    aiAssistantServiceMock = Mockito.mock(AiAssistantService.class);
-    notificationServiceMock = Mockito.mock(NotificationService.class);
-
     // 2. Билдим scope модуля. Наша WebRouterConfiguration автоматически запустится внутри билдера!
     beanScope = BeanScope.builder()
         .beans(bookingServiceMock, aiAssistantServiceMock, notificationServiceMock)
