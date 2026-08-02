@@ -4,8 +4,8 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 import salon.api.model.Appointment;
-import salon.api.model.Client;
 import salon.api.model.Master;
+import salon.api.model.ProcessMessageCommand;
 
 /**
  * Высокоуровневый бизнес-ориентированный порт (Use Case) для управления процессами салона.
@@ -17,7 +17,7 @@ public interface BookingService {
    * Идентифицирует клиента по Telegram ID или создает новый профиль, если он пишет впервые.
    * Реализует атомарный шаг Use Case №1.
    */
-  Client identifyOrCreateTelegramClient(String telegramId, String firstName);
+  void processMessage(ProcessMessageCommand command);
 
   /**
    * Возвращает список всех работающих мастеров для ИИ-подсказок или сетки GUI.

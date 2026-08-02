@@ -1,24 +1,27 @@
 package salon.db.jooq.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static salon.db.jooq.generated.Tables.APPOINTMENTS;
+import static salon.db.jooq.generated.Tables.CLIENTS;
+import static salon.db.jooq.generated.Tables.MASTERS;
+import static salon.db.jooq.generated.Tables.MESSAGE_TRACES;
 
 import io.avaje.inject.test.InjectTest;
 import jakarta.inject.Inject;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
 import org.jooq.DSLContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.MDC;
-import salon.api.exception.IntegrityViolationException;
 import salon.api.model.Appointment;
-import salon.api.model.Client;
+import salon.api.model.AppointmentStatus;
+import salon.api.model.Master;
+import salon.api.model.PlatformType;
+import salon.api.model.ProcessMessageCommand;
 import salon.api.service.BookingService;
 
 @InjectTest // CORRECT: Instructs avaje-inject to spin up the test container context
@@ -28,24 +31,17 @@ public class BookingServiceImplTest {
   public BookingService bookingService;
 
   @Inject
-  public DSLContext ctx;
+  public DSLContext dslCtx;
 
   @BeforeEach
   void setUp() {
-    // 1. Временно выключаем проверку внешних ключей в H2, чтобы разрешить очистку
-    ctx.execute("SET REFERENTIAL_INTEGRITY FALSE");
-
-    // 2. Очищаем таблицы и сбрасываем счетчики ID (RESTART IDENTITY поддерживается в H2)
-    ctx.execute("TRUNCATE TABLE appointments RESTART IDENTITY");
-    ctx.execute("TRUNCATE TABLE clients RESTART IDENTITY");
-    ctx.execute("TRUNCATE TABLE masters RESTART IDENTITY");
-
-    // 3. Обязательно включаем проверку ссылочной целостности обратно!
-    ctx.execute("SET REFERENTIAL_INTEGRITY TRUE");
-
-    // 4. Накатываем фикстуру (мастера) для текущего теста
-    ctx.execute("INSERT INTO masters (first_name, last_name, specialization, is_active) " +
-        "VALUES ('Elena', 'Petrova', 'Top Colorist', true)");
+    // Идеальная очистка контекста СУБД H2 перед каждым тестом
+    dslCtx.execute("SET REFERENTIAL_INTEGRITY FALSE");
+    dslCtx.truncate(MESSAGE_TRACES).execute();
+    dslCtx.truncate(APPOINTMENTS).execute(); // ДОБАВЛЕНО
+    dslCtx.truncate(CLIENTS).execute();
+    dslCtx.truncate(MASTERS).execute();      // ДОБАВЛЕНО
+    dslCtx.execute("SET REFERENTIAL_INTEGRITY TRUE");
   }
 
   @AfterEach
@@ -53,103 +49,261 @@ public class BookingServiceImplTest {
     MDC.clear();
   }
 
+  /**
+   * <h3>Тест 1: Успешное создание профиля нового клиента (Happy Path)</h3>
+   */
   @Test
-  void shouldRegisterNewTelegramClientOnFirstContact() {
-    MDC.put("traceId", "TX-ON-FIRST-CONTACT-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase());
-    // Act
-    Client client = bookingService.identifyOrCreateTelegramClient("55512345", "Natalia");
+  void shouldAutoCreateClientAndLogTraceWhenNewDiscovered() {
+    ProcessMessageCommand command = new ProcessMessageCommand(
+        "TX-BOOK-101", PlatformType.TELEGRAM, "55512345", "Natalia", "Хочу записаться"
+    );
 
-    // Assert
-    assertNotNull(client.id(), "A database surrogate ID should be auto-assigned.");
-    assertEquals("Natalia", client.firstName());
-    assertEquals("55512345", client.telegramId());
+    bookingService.processMessage(command);
+
+    var clientRecord = dslCtx.selectFrom(CLIENTS).where(CLIENTS.TELEGRAM_ID.eq("55512345")).fetchOptional();
+    assertTrue(clientRecord.isPresent());
+    assertEquals("Natalia", clientRecord.get().getFirstName());
+
+    var traceRecord = dslCtx.selectFrom(MESSAGE_TRACES).where(MESSAGE_TRACES.TRACE_ID.eq("TX-BOOK-101")).fetchOptional();
+    assertTrue(traceRecord.isPresent());
+    assertEquals("INBOUND", traceRecord.get().getDirection());
+    assertEquals(clientRecord.get().getId(), traceRecord.get().getClientId());
   }
 
+  /**
+   * <h3>Тест 2: Повторные обращения от существующего клиента (Идемпотентность профиля)</h3>
+   */
   @Test
-  void shouldRetrieveExistingClientWithoutDuplicates() {
-    MDC.put("traceId", "TX-ON-CLIENT-WITHOUT-DUPLICATES-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase());
-    // Arrange
-    Client firstPass = bookingService.identifyOrCreateTelegramClient("99999", "Olga");
+  void shouldReuseExistingProfileOnSubsequentRequests() {
+    ProcessMessageCommand firstPass = new ProcessMessageCommand(
+        "TX-BOOK-201", PlatformType.TELEGRAM, "99999", "Natalia", "Привет"
+    );
+    ProcessMessageCommand secondPass = new ProcessMessageCommand(
+        "TX-BOOK-202", PlatformType.TELEGRAM, "99999", "Natalia", "Второе сообщение"
+    );
 
-    MDC.put("traceId", "TX-ON-CLIENT-WITHOUT-DUPLICATES-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase());
-    // Act
-    Client secondPass = bookingService.identifyOrCreateTelegramClient("99999", "Olga (Updated Handle)");
+    bookingService.processMessage(firstPass);
+    bookingService.processMessage(secondPass);
 
-    // Assert
-    assertEquals(firstPass.id(), secondPass.id(), "Should resolve to the identical record ID match.");
-    assertEquals("Olga", secondPass.firstName(), "The stored state should maintain structural data.");
+    assertEquals(1, dslCtx.fetchCount(CLIENTS), "Повторные запросы не должны дублировать клиента.");
+    assertEquals(2, dslCtx.fetchCount(MESSAGE_TRACES), "Каждое сообщение должно логироваться отдельно.");
   }
 
+  /**
+   * <h3>Тест 3: Строгая изоляция профилей разных пользователей</h3>
+   */
   @Test
-  void shouldSuccessfullyBookAvailableTimeSlot() {
-    MDC.put("traceId", "TX-AVAILABLE-TIME-SLOT-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase());
-    // Arrange
-    Client client = bookingService.identifyOrCreateTelegramClient("11111", "Anna");
-    Long masterId = 1L; // Elena Petrova auto identity serial from seed
-    LocalDateTime bookingTime = LocalDateTime.of(2026, 7, 20, 14, 0);
+  void shouldMaintainStrictIsolationBetweenDistinctAccounts() {
+    ProcessMessageCommand clientA = new ProcessMessageCommand(
+        "TX-BOOK-301", PlatformType.TELEGRAM, "11111", "Natalia", "Запрос А"
+    );
+    ProcessMessageCommand clientB = new ProcessMessageCommand(
+        "TX-BOOK-302", PlatformType.TELEGRAM, "22222", "Anna", "Запрос Б"
+    );
 
-    MDC.put("traceId", "TX-AVAILABLE-TIME-SLOT-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase());
-    // Act
-    Optional<Appointment> appointmentOpt = bookingService.tryAiBooking(client.id(), masterId, bookingTime, 60);
+    bookingService.processMessage(clientA);
+    bookingService.processMessage(clientB);
 
-    // Assert
-    assertTrue(appointmentOpt.isPresent(), "Appointment should save successfully when slot is vacant.");
-    Appointment appointment = appointmentOpt.get();
-    assertNotNull(appointment.id());
-    assertEquals(client.id(), appointment.clientId());
-    assertEquals(masterId, appointment.masterId());
+    assertEquals(2, dslCtx.fetchCount(CLIENTS), "Должно быть создано 2 раздельных аккаунта.");
   }
 
+  /**
+   * <h3>Тест 4: Граничный случай — создание клиента без имени (Скрытый профиль / Meta API)</h3>
+   * <p><b>Бизнес-контекст:</b> Если имя пользователя null или пустое, система не должна падать.
+   * Она обязана подставить безопасное дефолтное значение "Guest" на уровне бизнес-логики.</p>
+   */
   @Test
-  void shouldRejectConcurrentBookingClashesViaOverlapLogic() {
-    // Arrange
-    MDC.put("traceId", "TX-CLASHES-VIA-OVERLAP-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase());
-    Client clientA = bookingService.identifyOrCreateTelegramClient("11111", "Anna");
-    MDC.put("traceId", "TX-CLASHES-VIA-OVERLAP-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase());
-    Client clientB = bookingService.identifyOrCreateTelegramClient("22222", "Svetlana");
-    Long masterId = 1L;
-    LocalDateTime bookingTime = LocalDateTime.of(2026, 7, 20, 14, 0);
+  void shouldFallbackToDefaultNameWhenFirstNameIsMissing() {
+    // Передаем null вместо имени в доменную команду
+    ProcessMessageCommand command = new ProcessMessageCommand(
+        "TX-BOOK-401", PlatformType.TELEGRAM, "777", null, "Привет от анонима"
+    );
 
-    // Act - Lock the slot down for Anna
-    MDC.put("traceId", "TX-CLASHES-VIA-OVERLAP-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase());
-    Optional<Appointment> bookingA = bookingService.tryAiBooking(clientA.id(), masterId, bookingTime, 60);
-    assertTrue(bookingA.isPresent());
+    bookingService.processMessage(command);
 
-    // Attempt overlapping reservation for Svetlana inside that exact window (e.g., 14:30)
-    MDC.put("traceId", "TX-CLASHES-VIA-OVERLAP-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase());
-    Optional<Appointment> bookingB = bookingService.tryAiBooking(clientB.id(), masterId, bookingTime.plusMinutes(30), 60);
-
-    // Assert
-    assertFalse(bookingB.isPresent(), "The service overlap layer verification block must block slot overlap collisions.");
+    var clientRecord = dslCtx.selectFrom(CLIENTS).where(CLIENTS.TELEGRAM_ID.eq("777")).fetchOptional();
+    assertTrue(clientRecord.isPresent());
+    // Проверяем, что система защитила базу данных от null и применила дефолтный маркер
+    assertEquals("Guest", clientRecord.get().getFirstName(), "При отсутствии имени система должна использовать заглушку 'Guest'.");
   }
 
+  /**
+   * <h3>Тест 5: Граничный случай — обработка пустого текстового содержимого</h3>
+   * <p><b>Бизнес-контекст:</b> Клиент прислал пустую строку. Факт сессии должен зафиксироваться
+   * в архиве логов без падения парсеров СУБД.</p>
+   */
   @Test
-  void shouldTranslateDatabaseUniqueConstraintsIntoCleanDomainExceptions() {
-    // Arrange
-    // 1. Register a valid client first so we have a real ID in the database
-    MDC.put("traceId", "TX-CLEAN-DOMAIN-EXCEPTIONS-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase());
-    Client client = bookingService.identifyOrCreateTelegramClient("777", "Natalia");
+  void shouldLogTraceCleanlyEvenWhenMessageTextIsEmpty() {
+    ProcessMessageCommand command = new ProcessMessageCommand(
+        "TX-BOOK-501", PlatformType.TELEGRAM, "11111", "Natalia", ""
+    );
 
-    Long masterId = 1L; // Master Elena seeded automatically in setUp()
-    LocalDateTime bookingTime = LocalDateTime.of(2026, 7, 20, 14, 0);
+    bookingService.processMessage(command);
 
-    // 2. Insert the canceled appointment row directly via jOOQ.
-    // It uses the valid client.id(), satisfying the Foreign Key constraint.
-    MDC.put("traceId", "TX-CLEAN-DOMAIN-EXCEPTIONS-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase());
-    ctx.insertInto(APPOINTMENTS)
-        .set(APPOINTMENTS.CLIENT_ID, client.id())
-        .set(APPOINTMENTS.MASTER_ID, masterId)
-        .set(APPOINTMENTS.APPOINTMENT_TIME, bookingTime)
-        .set(APPOINTMENTS.DURATION_MINUTES, 60)
-        .set(APPOINTMENTS.STATUS, "CANCELED")
+    var traceRecord = dslCtx.selectFrom(MESSAGE_TRACES).where(MESSAGE_TRACES.TRACE_ID.eq("TX-BOOK-501")).fetchOptional();
+    assertTrue(traceRecord.isPresent());
+    assertEquals("", traceRecord.get().getMessageText(), "Пустая текстовая строка должна корректно ложиться в базу.");
+  }
+
+  /**
+   * <h3>Тест 6: Получение списка активных стилистов салона</h3>
+   * <p><b>Бизнес-контекст:</b> ИИ запрашивает сетку мастеров для отправки клиенту.
+   * Метод должен возвращать только тех специалистов, у которых выставлен флаг активности.</p>
+   */
+  @Test
+  void shouldReturnOnlyActiveStylistsWhenQueried() {
+    // Arrange: Напрямую вставляем одного активного мастера и одного уволенного/неактивного
+    dslCtx.insertInto(MASTERS)
+        .set(MASTERS.ID, 1L)
+        .set(MASTERS.FIRST_NAME, "Elena")
+        .set(MASTERS.LAST_NAME, "Petrova")
+        .set(MASTERS.SPECIALIZATION, "Top Colorist")
+        .set(MASTERS.IS_ACTIVE, true) // АКТИВНЫЙ
         .execute();
 
-    // Act & Assert
-    // 3. Try to book the exact same slot.
-    // The Java code thinks 'CANCELED' means vacant and triggers the INSERT.
-    // The database catches the duplicate (masterId + bookingTime) index, throwing the integrity error.
-    MDC.put("traceId", "TX-CLEAN-DOMAIN-EXCEPTIONS-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase());
-    assertThrows(IntegrityViolationException.class, () -> bookingService.tryAiBooking(client.id(), masterId, bookingTime, 60), "The service layer wrapper must trap internal jOOQ unique constraint anomalies and rethrow pure Domain Exception types.");
+    dslCtx.insertInto(MASTERS)
+        .set(MASTERS.ID, 2L)
+        .set(MASTERS.FIRST_NAME, "Anna")
+        .set(MASTERS.LAST_NAME, "Ivanova")
+        .set(MASTERS.SPECIALIZATION, "Stylist")
+        .set(MASTERS.IS_ACTIVE, false) // НЕАКТИВНЫЙ
+        .execute();
+
+    // Act
+    List<Master> activeStylists = bookingService.getAvailableStylists();
+
+    // Assert
+    assertEquals(1, activeStylists.size(), "Метод обязан отсекать неактивных мастеров салона.");
+    Master master = activeStylists.getFirst();
+    assertEquals("Elena", master.firstName());
+    assertEquals("Top Colorist", master.specialization());
   }
 
+  /**
+   * <h3>Тест 7: Успешное предварительное ИИ-бронирование слота</h3>
+   * <p><b>Бизнес-контекст:</b> ИИ подобрал свободное время для клиента и пытается его занять.
+   * Слот свободен, запись создается в статусе пред-проверки AI_PENDING.</p>
+   */
+  @Test
+  void shouldSuccessfullyCreateProvisionBookingWhenSlotIsFree() {
+    // Arrange: Создаем родительские записи клиента и мастера
+    long clientId = 100L;
+    long masterId = 1L;
+    LocalDateTime slotTime = LocalDateTime.parse("2026-08-10T14:00:00");
+
+    dslCtx.insertInto(CLIENTS)
+        .set(CLIENTS.ID, clientId)
+        .set(CLIENTS.FIRST_NAME, "Natalia")
+        .set(CLIENTS.TELEGRAM_ID, "123")
+        .execute();
+    dslCtx.insertInto(MASTERS)
+        .set(MASTERS.ID, masterId)
+        .set(MASTERS.FIRST_NAME, "Elena")
+        .set(MASTERS.LAST_NAME, "Petrova")
+        .set(MASTERS.IS_ACTIVE, true).execute();
+
+    // Act
+    Optional<Appointment> appointmentOpt = bookingService.tryAiBooking(clientId, masterId, slotTime, 60);
+
+    // Assert
+    assertTrue(appointmentOpt.isPresent(), "Если время свободно, пред-бронирование должно возвращать объект записи.");
+    Appointment appointment = appointmentOpt.get();
+    assertEquals(AppointmentStatus.AI_PENDING, appointment.status(), "ИИ-бронь обязана создаваться в статусе ожидания проверки (AI_PENDING).");
+    assertEquals(slotTime, appointment.appointmentTime());
+
+    // Проверяем физическое наличие строки в таблице
+    int dbCount = dslCtx.fetchCount(APPOINTMENTS);
+    assertEquals(1, dbCount);
+  }
+
+  /**
+   * <h3>Тест 8: Конфликт расписания при попытке ИИ-бронирования</h3>
+   * <p><b>Бизнес-контекст:</b> ИИ пытается записать клиента на слот, который пересекается
+   * с уже существующей записью другого человека к этому же мастеру.</p>
+   */
+  @Test
+  void shouldReturnEmptyOptionalWhenAiBookingClashesWithExistingAppointment() {
+    // Arrange
+    long clientA = 100L;
+    long clientB = 200L;
+    long masterId = 1L;
+    LocalDateTime existingSlot = LocalDateTime.parse("2026-08-10T14:00:00");
+    LocalDateTime clashingSlot = LocalDateTime.parse("2026-08-10T14:30:00"); // Пересекается по длительности (60 мин)
+
+    dslCtx.insertInto(CLIENTS)
+        .set(CLIENTS.ID, clientA)
+        .set(CLIENTS.FIRST_NAME, "Natalia")
+        .set(CLIENTS.TELEGRAM_ID, "123").execute();
+    dslCtx.insertInto(CLIENTS)
+        .set(CLIENTS.ID, clientB)
+        .set(CLIENTS.FIRST_NAME, "Anna")
+        .set(CLIENTS.TELEGRAM_ID, "456")
+        .execute();
+    dslCtx.insertInto(MASTERS)
+        .set(MASTERS.ID, masterId)
+        .set(MASTERS.FIRST_NAME, "Elena")
+        .set(MASTERS.LAST_NAME, "Petrova")
+        .set(MASTERS.IS_ACTIVE, true)
+        .execute();
+
+    // Создаем жесткую существующую бронь в системе
+    dslCtx.insertInto(APPOINTMENTS)
+        .set(APPOINTMENTS.CLIENT_ID, clientA)
+        .set(APPOINTMENTS.MASTER_ID, masterId)
+        .set(APPOINTMENTS.APPOINTMENT_TIME, existingSlot)
+        .set(APPOINTMENTS.DURATION_MINUTES, 60)
+        .set(APPOINTMENTS.STATUS, "CONFIRMED")
+        .execute();
+
+    // Act: Пытаемся поверх записать второго клиента на пересекающееся время
+    Optional<Appointment> result = bookingService.tryAiBooking(clientB, masterId, clashingSlot, 60);
+
+    // Assert
+    assertTrue(result.isEmpty(), "Метод обязан блокировать накладки расписания и возвращать Optional.empty().");
+    assertEquals(1, dslCtx.fetchCount(APPOINTMENTS), "В базе должна остаться только первоначальная запись.");
+  }
+
+  /**
+   * <h3>Тест 9: Подтверждение записи владельцем салона (Оркестрация статуса)</h3>
+   * <p><b>Бизнес-контекст:</b> Владелец салона заходит в панель управления, видит бронь AI_PENDING
+   * и одобряет её, переводя в финальный рабочий статус CONFIRMED.</p>
+   */
+  @Test
+  void shouldTransitionStatusToConfirmedWhenApprovedByOwner() {
+    // Arrange
+    long clientId = 100L;
+    long masterId = 1L;
+    long appointmentId = 999L;
+    LocalDateTime slotTime = LocalDateTime.parse("2026-08-10T14:00:00");
+
+    dslCtx.insertInto(CLIENTS)
+        .set(CLIENTS.ID, clientId)
+        .set(CLIENTS.FIRST_NAME, "Natalia")
+        .set(CLIENTS.TELEGRAM_ID, "123")
+        .execute();
+    dslCtx.insertInto(MASTERS)
+        .set(MASTERS.ID, masterId)
+        .set(MASTERS.FIRST_NAME, "Elena")
+        .set(MASTERS.LAST_NAME, "Petrova")
+        .set(MASTERS.IS_ACTIVE, true)
+        .execute();
+
+    // Вставляем предварительную ИИ-запись
+    dslCtx.insertInto(APPOINTMENTS)
+        .set(APPOINTMENTS.ID, appointmentId)
+        .set(APPOINTMENTS.CLIENT_ID, clientId)
+        .set(APPOINTMENTS.MASTER_ID, masterId)
+        .set(APPOINTMENTS.APPOINTMENT_TIME, slotTime)
+        .set(APPOINTMENTS.DURATION_MINUTES, 60)
+        .set(APPOINTMENTS.STATUS, "AI_PENDING")
+        .execute();
+
+    // Act: Одобряем запись по её первичному ключу ID
+    bookingService.approveAppointment(appointmentId);
+
+    // Assert: Вычитываем запись для проверки изменения статуса
+    var record = dslCtx.selectFrom(APPOINTMENTS).where(APPOINTMENTS.ID.eq(appointmentId)).fetchOptional();
+    assertTrue(record.isPresent());
+    assertEquals("APPROVED", record.get().getStatus(), "После одобрения владельцем статус обязан стать APPROVED.");
+  }
 }

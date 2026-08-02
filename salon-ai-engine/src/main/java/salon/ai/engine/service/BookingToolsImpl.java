@@ -1,6 +1,7 @@
 package salon.ai.engine.service;
 
 import dev.langchain4j.agent.tool.Tool;
+import io.avaje.inject.External;
 import jakarta.inject.Singleton;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -18,7 +19,7 @@ final class BookingToolsImpl implements BookingTools {
 
   private final BookingService bookingService;
 
-  BookingToolsImpl(BookingService bookingService) {
+  BookingToolsImpl(@External BookingService bookingService) {
     this.bookingService = bookingService;
   }
 

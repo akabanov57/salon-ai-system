@@ -7,6 +7,7 @@ import io.avaje.inject.Bean;
 import io.avaje.inject.Factory;
 import io.avaje.jex.Jex;
 import io.avaje.jex.Routing.HttpService;
+import io.avaje.jex.http.HttpFilter;
 import io.avaje.jex.ssl.SslPlugin;
 import io.avaje.jsonb.Jsonb;
 import java.io.File;
@@ -14,11 +15,8 @@ import java.net.URI;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
-import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.slf4j.MDC;
-import salon.web.http.internal.services.TelegramVerificationService;
 
 @Factory
 final class WebConfiguration {
@@ -38,7 +36,7 @@ final class WebConfiguration {
    *                        Telegram Bot API.
    */
   @Bean
-  Jex jex(List<HttpService> httpServices, TelegramVerificationService telegramService) {
+  Jex jex(List<HttpService> httpServices) {
     int port = Config.getInt("server.port", 8443);
     boolean sslEnabled = Config.getBool("server.ssl.enabled", false); // ЧИТАЕМ ФЛАГ ВКЛЮЧЕНИЯ SSL
 
@@ -144,37 +142,8 @@ final class WebConfiguration {
       log.info("[SSL] Сервер Jex запускается по обычному протоколу HTTP (SSL отключен).");
     }
 
-    // Сквозной Trace ID интерцептор (MDC)
-    jex.before(ctx -> {
-      String traceId = ctx.header("X-Trace-ID");
-      if (traceId == null || traceId.isBlank()) {
-        traceId = "TX-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
-      }
-      MDC.put("traceId", traceId);
-    });
-
-    // =====================================================================
-    // ГЛОБАЛЬНЫЙ СЕТЕВОЙ ФИЛЬТР БЕЗОПАСНОСТИ WEBHOOK (Исправленный под сигнатуру Jex)
-    // =====================================================================
-    jex.before(ctx -> {
-      // Точечно перехватываем только POST-запросы на эндпоинт сообщений Telegram
-      if ("POST".equalsIgnoreCase(ctx.method()) && "/api/v1/webhooks/message".equals(ctx.path())) {
-
-        String telegramHeaderToken = ctx.header("X-Telegram-Bot-Api-Secret-Token");
-
-        boolean isAuthorized = telegramService.isValidTelegramRequest(telegramHeaderToken);
-        if (!isAuthorized) {
-          log.warn(
-              "Блокировка на границе сети: Неверный секретный токен вебхука Telegram. Доступ "
-                  + "отклонен.");
-
-          // Мгновенно прерываем цепочку обработки, возвращая 401 Unauthorized
-          ctx.status(401).text("Unauthorized: Invalid webhook secret token source.");
-        }
-      }
-    });
-
-    jex.after(_ -> MDC.clear());
+    // Каждый сгенерированный метод @Filter из WebFilters теперь нативно встает в стек Jex!
+//    httpFilters.forEach(jex::filter);
 
     // Монтируем сгенерированные контроллеры маршрутов
     jex.routing(httpServices);

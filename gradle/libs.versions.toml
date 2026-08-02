@@ -3,7 +3,7 @@
 [versions]
 jooq = "3.21.6"
 avajeInject = "12.6"
-avajeHttp = "3.10"
+avajeHttp = "3.11-RC1"
 avajeJex = "3.6" # Добавляем версию веб-сервера Jex
 avajeJsonb = "3.14"
 avajeValidator = "2.17"

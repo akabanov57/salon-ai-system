@@ -24,6 +24,7 @@ dependencies {
     implementation(libs.avaje.config)
 
     testImplementation(libs.test.mockito)
+    //testImplementation(libs.avaje.inject.test)
 }
 
 // =====================================================================

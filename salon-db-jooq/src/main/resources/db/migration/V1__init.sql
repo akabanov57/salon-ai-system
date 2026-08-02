@@ -72,3 +72,23 @@ CREATE TABLE ai_chat_messages
     content    TEXT                                NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
+
+-- Update your master schema file inside the salon-db-jooq module
+CREATE TABLE message_traces (
+                                id BIGSERIAL PRIMARY KEY,
+                                trace_id VARCHAR(64) NOT NULL,
+                                platform_type VARCHAR(32) NOT NULL, -- 'TELEGRAM', 'INSTAGRAM'
+                                platform_id VARCHAR(64) NOT NULL,   -- The true natural key! (e.g., Telegram User ID)
+                                direction VARCHAR(16) NOT NULL,     -- 'INBOUND', 'OUTBOUND'
+                                raw_payload TEXT,
+                                message_text TEXT NOT NULL,
+                                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                                client_id BIGINT,                   -- Maintained internally for FK cascading only
+
+                                CONSTRAINT fk_message_traces_client FOREIGN KEY (client_id)
+                                    REFERENCES clients (id) ON DELETE CASCADE
+);
+
+-- Optimize queries searching historical text trails by the true natural handle coordinates
+CREATE INDEX idx_msg_traces_natural_key ON message_traces (platform_type, platform_id, created_at DESC);
+CREATE INDEX idx_msg_traces_trace_id ON message_traces (trace_id);

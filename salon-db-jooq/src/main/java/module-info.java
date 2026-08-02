@@ -7,6 +7,7 @@ module salon.db.jooq {
   requires org.jooq;
   requires org.slf4j;
   requires salon.api;
+  requires io.avaje.validation.contraints;
 
   provides io.avaje.inject.spi.InjectExtension with salon.db.jooq.JooqModule;
 }

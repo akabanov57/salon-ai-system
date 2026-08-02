@@ -1,19 +1,25 @@
 package salon.ai.engine.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.time.LocalDateTime;
+import io.avaje.inject.BeanScope;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 import salon.ai.engine.internal.service.LowLevelAiService;
-import salon.api.model.Client;
+import salon.api.exception.AiEngineException;
+import salon.api.model.PlatformType;
+import salon.api.model.ProcessMessageCommand;
+import salon.api.service.AiAssistantService;
 import salon.api.service.BookingService;
 
 /**
@@ -23,59 +29,100 @@ import salon.api.service.BookingService;
  */
 class AiAssistantServiceImplTest {
 
-  private LowLevelAiService lowLevelAiServiceMock;
-  private AiAssistantServiceImpl aiAssistantService;
+  private static BeanScope beanScope;
+
+  // Объявляем замещение низкоуровневого ИИ-агента (LangChain4j) тестовым моком
+  private static final LowLevelAiService lowLevelAiServiceMock = Mockito.mock(LowLevelAiService.class);
+  private static final BookingService bookingServiceMock = Mockito.mock(BookingService.class);
+
+  private AiAssistantService aiAssistantService;
+
+  @BeforeAll
+  static void startPipeline() {
+    beanScope = BeanScope.builder()
+        //.modules(new salon.ai.engine.EngineModule()) // Load the AI engine's generated module
+        .beans(lowLevelAiServiceMock, bookingServiceMock) // Provide our mock definitions
+        .build();
+  }
+
+  @AfterAll
+  static void stopPipeline() {
+    if (beanScope != null) {
+      beanScope.close();
+    }
+  }
 
   @BeforeEach
   void setUp() {
-    // Instantiate lightweight mock proxy stubs for required constructor arguments
-    BookingService bookingServiceMock = Mockito.mock(BookingService.class);
-    lowLevelAiServiceMock = Mockito.mock(LowLevelAiService.class);
+      // Reset mocks to ensure total isolation between execution runs
+      Mockito.reset(lowLevelAiServiceMock, bookingServiceMock);
 
-    // FIX: Stub the database profile lookup so it never returns a dangerous null bridge pointer
-    Client dummyClient = new Client(1L, "Ivan", null, null, "telegram_chat_555", null, 0, LocalDateTime.now());
-    when(bookingServiceMock.identifyOrCreateTelegramClient(anyString(), any()))
-        .thenReturn(dummyClient);
-
-    aiAssistantService = new AiAssistantServiceImpl(bookingServiceMock, lowLevelAiServiceMock);
+      // Extract the fully-wired interface bean from our custom test container
+      aiAssistantService = beanScope.get(AiAssistantService.class);
   }
 
   /**
-   * <p><b>VERIFICATION OBJECTIVES:</b>
+   * <p><b>ПРОВЕРЯЕМЫЕ ЦЕЛИ (Happy Path):</b>
    * <ul>
-   *   <li>Verify that invoking {@code processChat} correctly delegates execution down into the internal low-level framework agent {@link LowLevelAiService#chat(String, String)}.</li>
-   *   <li>Verify that parameters ({@code platformId}, {@code userMessageText}) are securely passed deep into the stateful execution tracks without distortions or truncations.</li>
-   *   <li>Verify that the final text string payload computed by the internal AI model is successfully returned back intact to the calling boundary component.</li>
+   *   <li>Убедиться, что сервис принимает доменную команду ProcessMessageCommand.</li>
+   *   <li>Проверить, что текстовый ответ от низкоуровневого агента возвращается без искажений.</li>
    * </ul>
    * </p>
    */
   @Test
-  void shouldSuccessfullyDelegateChatParametersToInternalLowLevelAiAgent() {
+  void shouldSuccessfullyProcessChatWhenAiEngineIsResponsive() {
     // Arrange
-    final String samplePlatformId = "telegram_chat_555";
-    final String sampleUserText = "Привет, к какому мастеру можно записаться на стрижку?";
-    final String expectedAiReply = "Привет! У нас свободны Елена и Наталья. К кому вас записать?";
+    String sampleResponse = "Отличный выбор! 💇‍♀️ Записала вас к Елене.";
+    when(lowLevelAiServiceMock.chat(anyString(), anyString())).thenReturn(sampleResponse);
 
-    // Stub the low-level agent to return our reply for any incoming text string
-    when(lowLevelAiServiceMock.chat(anyString(), anyString()))
-        .thenReturn(expectedAiReply);
+    // Формируем чистую доменную команду с валидными параметрами
+    ProcessMessageCommand command = new ProcessMessageCommand(
+        "TX-AI-TEST-001",
+        PlatformType.TELEGRAM,
+        "12345678",
+        "Natalia",
+        "Хочу записаться к Елене на стрижку"
+    );
+
+    assertNotNull(aiAssistantService, "DI-контейнер обязан успешно инициализировать AiAssistantService.");
 
     // Act
-    final String actualReply = aiAssistantService.processChat(samplePlatformId, sampleUserText);
+    String actualResponse = aiAssistantService.processChat(command);
 
-    // Assert Step 1: Verify the unmodified AI text reply traverses the layer boundary cleanly
-    assertEquals(expectedAiReply, actualReply, "The business bridge adapter must pass back the text response unmodified.");
+    // Assert
+    assertEquals(sampleResponse, actualResponse, "Итоговый ответ должен в точности соответствовать сгенерированному ИИ тексту.");
+    verify(lowLevelAiServiceMock, times(1)).chat("12345678", "Хочу записаться к Елене на стрижку");
+  }
 
-    // Assert Step 2: Use an ArgumentCaptor to intercept and inspect the exact metadata string injected on Line 62
-    final ArgumentCaptor<String> textPayloadCaptor = ArgumentCaptor.forClass(String.class);
-    verify(lowLevelAiServiceMock).chat(Mockito.eq(samplePlatformId), textPayloadCaptor.capture());
+  /**
+   * <p><b>ПРОВЕРЯЕМЫЕ ЦЕЛИ (Error Handling):</b>
+   * <ul>
+   *   <li>Проверить, что внутренние сбои LangChain4j перехватываются.</li>
+   *   <li>Гарантировать трансляцию технической ошибки в доменное исключение {@link AiEngineException}.</li>
+   * </ul>
+   * </p>
+   */
+  @Test
+  void shouldThrowAiEngineExceptionWhenLowLevelAgentCrashes() {
+    // Arrange
+    when(lowLevelAiServiceMock.chat(anyString(), anyString()))
+        .thenThrow(new RuntimeException("Connection to Ollama failed or timed out"));
 
-    final String capturedActualMessage = textPayloadCaptor.getValue();
+    ProcessMessageCommand command = new ProcessMessageCommand(
+        "TX-AI-FAIL-002",
+        PlatformType.TELEGRAM,
+        "12345678",
+        "Natalia",
+        "Тестовый сбой"
+    );
 
-    // Explicitly assert that the system metadata context and client fields are formatted correctly
-    assertTrue(capturedActualMessage.contains("Client Database ID is 1"));
-    assertTrue(capturedActualMessage.contains("First Name: Ivan"));
-    assertTrue(capturedActualMessage.contains(sampleUserText));
+    // Act & Assert
+    AiEngineException exception = assertThrows(AiEngineException.class, () -> {
+      aiAssistantService.processChat(command);
+    }, "При падении ИИ-движка сервис обязан выбросить специализированное исключение AiEngineException.");
+
+    assertTrue(exception.getMessage().contains("Внутренний сбой фабрики ИИ"),
+        "Сообщение об ошибке должно содержать понятный доменный контекст.");
   }
 
 }

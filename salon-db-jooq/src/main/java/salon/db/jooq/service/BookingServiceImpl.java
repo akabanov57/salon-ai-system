@@ -3,7 +3,9 @@ package salon.db.jooq.service;
 import static salon.db.jooq.generated.Tables.APPOINTMENTS;
 import static salon.db.jooq.generated.Tables.CLIENTS;
 import static salon.db.jooq.generated.Tables.MASTERS;
+import static salon.db.jooq.generated.Tables.MESSAGE_TRACES;
 
+import io.avaje.validation.constraints.Valid;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import java.time.LocalDateTime;
@@ -11,7 +13,6 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import org.jooq.DSLContext;
-import org.jooq.exception.IntegrityConstraintViolationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import salon.api.exception.IntegrityViolationException;
@@ -20,6 +21,7 @@ import salon.api.model.Appointment;
 import salon.api.model.AppointmentStatus;
 import salon.api.model.Client;
 import salon.api.model.Master;
+import salon.api.model.ProcessMessageCommand;
 import salon.api.service.BookingService;
 
 @Singleton
@@ -27,66 +29,93 @@ final class BookingServiceImpl implements BookingService {
 
   private static final Logger log = LoggerFactory.getLogger(BookingServiceImpl.class);
 
-  private final DSLContext ctx;
+  private final DSLContext dslCtx;
 
   // Внедряем ТОЛЬКО DSLContext. Никаких промежуточных репозиториев!
   @Inject
-  public BookingServiceImpl(DSLContext ctx) {
-    this.ctx = ctx;
+  public BookingServiceImpl(DSLContext dslCtx) {
+    this.dslCtx = dslCtx;
   }
 
   private RuntimeException translateException(String contextMessage, Exception ex) {
     log.error("Infrastructure trapped failure details: {}", ex.getMessage(), ex);
 
-    // 1. Проверяем на специфичное для jOOQ нарушение ограничений уникальности (Natural Keys)
-    if (ex instanceof IntegrityConstraintViolationException) {
+    // 1. Handle jOOQ's native integrity exception wrappers directly
+    if (ex instanceof org.jooq.exception.IntegrityConstraintViolationException) {
       return new IntegrityViolationException(contextMessage + ": Business data integrity restriction violated.", ex);
     }
 
-    // 2. Дополнительная защита на случай, если драйвер базы данных пробросил кастомный SQLState
-    if (ex.getMessage() != null && ex.getMessage().contains("uk_")) {
-      return new IntegrityViolationException(contextMessage + ": Unique natural key constraint violation.", ex);
+    // 2. Fallback check: Extract raw JDBC SQLException metadata to check for SQLState 23505
+    Throwable cause = ex;
+    while (cause != null) {
+      if (cause instanceof java.sql.SQLException sqlEx) {
+        String sqlState = sqlEx.getSQLState();
+        if ("23505".equals(sqlState)) { // Universal ANSI SQL standard code for unique constraint violation
+          return new IntegrityViolationException(contextMessage + ": Unique data constraint violation detected via SQLState.", ex);
+        }
+      }
+      cause = cause.getCause();
     }
 
-    if (ex.getCause() != null && ex.getCause().getMessage() != null && ex.getCause().getMessage().contains("uk_")) {
-      return new IntegrityViolationException(contextMessage + ": Underlying structural unique constraint violation.", ex);
-    }
-
-    // 3. Во всех остальных случаях (NPE, падение коннекта к Postgres, тайм-аут) возвращаем общую ошибку хранилища
+    // 3. Structural fallback if any database pool drops, connection timeouts occur, etc.
     return new StorageInfrastructureException(contextMessage + ": Internal data storage layer error encountered.", ex);
   }
 
+  private Client txIdOrCreateTelegramClientInternal(DSLContext txCtx, String telegramId, String firstName) {
+    log.info("Business Step: Identifying TG client [{}] inside transactional bounds", telegramId);
+
+    // FIX: Enforce a safe business fallback handle if the messaging platform hides the user's name
+    // TODO Поддержка языка.
+    final String resolvedName = (firstName == null || firstName.isBlank()) ? "Guest" : firstName;
+
+    // Natively stream the mapping conversion or execute the insert fallback block cleanly
+    return txCtx.selectFrom(CLIENTS)
+        .where(CLIENTS.TELEGRAM_ID.eq(telegramId))
+        .fetchOptional()
+        .map(r -> new Client(
+            r.getId(), r.getFirstName(), r.getLastName(), r.getPhone(),
+            r.getTelegramId(), r.getInstagramId(), r.getBonusBalance(), r.getCreatedAt()
+        ))
+        .orElseGet(() -> {
+          // FALLBACK PHASE: Triggers seamlessly only if the optional wrapper is empty!
+          log.info("New client discovered. Generating profile for {}", firstName);
+          var newRecord = txCtx.insertInto(CLIENTS)
+              .set(CLIENTS.FIRST_NAME, resolvedName)
+              .set(CLIENTS.TELEGRAM_ID, telegramId)
+              .returning()
+              .fetchOne();
+
+          Objects.requireNonNull(newRecord, "Database failed to return the newly inserted client record.");
+
+          return new Client(
+              newRecord.getId(), newRecord.getFirstName(), newRecord.getLastName(),
+              newRecord.getPhone(), newRecord.getTelegramId(), newRecord.getInstagramId(),
+              newRecord.getBonusBalance(), newRecord.getCreatedAt()
+          );
+        });
+  }
+
   @Override
-  public Client identifyOrCreateTelegramClient(String telegramId, String firstName) {
-    log.info("Business Step: Identifying TG client [{}]", telegramId);
+  public void processMessage(@Valid ProcessMessageCommand command) {
+    log.info("[Domain Use-Case] Начат цикл обработки обращения для платформы {} (ID: {})",
+        command.platformType(), command.platformId());
+
     try {
-      return ctx.transactionResult(configuration -> {
+      dslCtx.transaction(configuration -> {
         DSLContext txCtx = configuration.dsl();
 
-        var optionalRecord = txCtx.selectFrom(CLIENTS)
-            .where(CLIENTS.TELEGRAM_ID.eq(telegramId))
-            .fetchOptional();
+        // Идентифицируем клиента
+        Client client = txIdOrCreateTelegramClientInternal(txCtx, command.platformId(), command.firstName());
 
-        if (optionalRecord.isPresent()) {
-          var r = optionalRecord.get();
-          return new Client(r.getId(), r.getFirstName(), r.getLastName(), r.getPhone(), r.getTelegramId(), r.getInstagramId(), r.getBonusBalance(), r.getCreatedAt());
-        }
-
-        log.info("New client discovered. Generating profile for {}", firstName);
-        var newRecord = txCtx.insertInto(CLIENTS)
-            .set(CLIENTS.FIRST_NAME, firstName)
-            .set(CLIENTS.TELEGRAM_ID, telegramId)
-            .returning()
-            .fetchOne();
-
-        // Если база вернула null, метод выбросит NPE с сообщением...
-        Objects.requireNonNull(newRecord, "Database failed to return the newly inserted client record.");
-
-        return new Client(
-            newRecord.getId(), newRecord.getFirstName(), newRecord.getLastName(),
-            newRecord.getPhone(), newRecord.getTelegramId(), newRecord.getInstagramId(),
-            newRecord.getBonusBalance(), newRecord.getCreatedAt()
-        );
+        // Прямая атомарная вставка лога
+        txCtx.insertInto(MESSAGE_TRACES)
+            .set(MESSAGE_TRACES.TRACE_ID, command.traceId())
+            .set(MESSAGE_TRACES.PLATFORM_TYPE, command.platformType().name())
+            .set(MESSAGE_TRACES.PLATFORM_ID, command.platformId())
+            .set(MESSAGE_TRACES.DIRECTION, "INBOUND")
+            .set(MESSAGE_TRACES.MESSAGE_TEXT, command.messageText())
+            .set(MESSAGE_TRACES.CLIENT_ID, client.id())
+            .execute();
       });
     } catch (Exception ex) {
       // ...но этот блок моментально ПЕРЕХВАТИТ этот NPE!
@@ -98,7 +127,7 @@ final class BookingServiceImpl implements BookingService {
   @Override
   public List<Master> getAvailableStylists() {
     log.debug("Запрос списка активных мастеров");
-    return ctx.selectFrom(MASTERS)
+    return dslCtx.selectFrom(MASTERS)
         .where(MASTERS.IS_ACTIVE.eq(true))
         .fetch()
         .map(r -> new Master(r.getId(), r.getFirstName(), r.getLastName(), r.getSpecialization(), r.getIsActive()));
@@ -111,7 +140,7 @@ final class BookingServiceImpl implements BookingService {
     try {
       LocalDateTime endTime = time.plusMinutes(durationMinutes);
       // Orchestrate the query logic inside an atomic, thread-safe jOOQ transaction pipeline
-      return ctx.transactionResult(configuration -> {
+      return dslCtx.transactionResult(configuration -> {
         DSLContext txCtx = configuration.dsl();
 
         // 1. Check for time-slot overlap using the mathematical grid allocation logic:
@@ -167,7 +196,7 @@ final class BookingServiceImpl implements BookingService {
   @Override
   public void approveAppointment(Long appointmentId) {
     log.info("Бизнес-шаг: Утверждение записи хозяйкой салона [id: {}]", appointmentId);
-    ctx.transaction(configuration -> configuration.dsl().update(APPOINTMENTS)
+    dslCtx.transaction(configuration -> configuration.dsl().update(APPOINTMENTS)
         .set(APPOINTMENTS.STATUS, AppointmentStatus.APPROVED.name())
         .where(APPOINTMENTS.ID.eq(appointmentId))
         .execute());

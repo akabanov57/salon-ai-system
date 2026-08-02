@@ -9,6 +9,7 @@ version = project.version
 
 dependencies {
     implementation(project(":salon-api"))
+    implementation(libs.avaje.validator.constraints)
     implementation(libs.jooq.core)
     jooqCodegen(libs.jooq.meta.extensions)
 
