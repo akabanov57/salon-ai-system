@@ -1,81 +1,104 @@
 -- =====================================================================
 -- 1. УНИФИЦИРОВАННАЯ ТАБЛИЦА КЛИЕНТОВ-АККАУНТОВ
 -- =====================================================================
-CREATE TABLE clients
+CREATE TABLE CLIENTS
 (
-    id            BIGSERIAL PRIMARY KEY,
-    platform_type VARCHAR(32) NOT NULL, -- 'TELEGRAM', 'INSTAGRAM'
-    platform_id   VARCHAR(64) NOT NULL, -- Натуральный ID мессенджера (chat_id / scoped_user_id)
-    display_name  VARCHAR(64) NOT NULL, -- Имя или никнейм, полученный из сети (дефолт: 'Guest')
-    bonus_balance INT         NOT NULL DEFAULT 0,
-    created_at    TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ID            BIGSERIAL PRIMARY KEY,
+    PLATFORM_TYPE VARCHAR(32) NOT NULL, -- 'TELEGRAM', 'INSTAGRAM'
+    PLATFORM_ID   VARCHAR(64) NOT NULL, -- Natural ID from the messenger platform (e.g., chat_id)
+    DISPLAY_NAME  VARCHAR(64) NOT NULL, -- Customer name or handle (Fallback: 'Guest')
+    BONUS_BALANCE INT         NOT NULL DEFAULT 0,
+    CREATED_AT    TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    -- Ограничение уникальности: аккаунт жестко изолирован внутри своего мессенджера
-    CONSTRAINT uk_client_scoped_to_platform_identity UNIQUE (platform_type, platform_id)
+    -- Financial safety constraint enforced at the data storage engine layer
+    CONSTRAINT CHK_CLIENT_BONUS_BALANCE_MUST_BE_POSITIVE_OR_ZERO CHECK (BONUS_BALANCE >= 0),
+
+    -- Absolute identity isolation rule per messaging environment
+    CONSTRAINT UK_CLIENT_SCOPED_TO_PLATFORM_IDENTITY UNIQUE (PLATFORM_TYPE, PLATFORM_ID)
 );
 
-CREATE INDEX idx_clients_platform_lookup ON clients (platform_type, platform_id);
+CREATE INDEX IDX_CLIENTS_PLATFORM_LOOKUP ON CLIENTS (PLATFORM_TYPE, PLATFORM_ID);
 
 
 -- =====================================================================
 -- 2. ТАБЛИЦА МАСТЕРОВ / СТИЛИСТОВ САЛОНА КРАСОТЫ
 -- =====================================================================
-CREATE TABLE masters
+CREATE TABLE MASTERS
 (
-    id             BIGSERIAL PRIMARY KEY,
-    first_name     VARCHAR(64)  NOT NULL,
-    last_name      VARCHAR(64)  NOT NULL,
-    specialization VARCHAR(128) NOT NULL, -- 'Top Colorist', 'Stylist' Strictly NOT NULL to safeguard AI intent recognition loops
-    is_active      BOOLEAN      NOT NULL DEFAULT TRUE,
-    created_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ID             BIGSERIAL PRIMARY KEY,
+    FIRST_NAME     VARCHAR(64)  NOT NULL,
+    LAST_NAME      VARCHAR(64)  NOT NULL,
+    SPECIALIZATION VARCHAR(128) NOT NULL,              -- Core skill context mapping (e.g., 'Top Colorist')
+    IS_ACTIVE      BOOLEAN      NOT NULL DEFAULT TRUE, -- Active employment status marker
+    CREATED_AT     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 
 -- =====================================================================
--- 3. ТАБЛИЦА СЕАНСОВ ЗАПИСЕЙ (РАСПИСАНИЕ ВИЗИТОВ)
+-- 3. ДИНАМИЧЕСКИЙ РАБОЧИЙ ГРАФИК (СМЕНЫ МАСТЕРОВ НА ДЕНЬ)
 -- =====================================================================
-CREATE TABLE appointments
+CREATE TABLE MASTER_SHIFTS
 (
-    id               BIGSERIAL PRIMARY KEY,
-    client_id        BIGINT      NOT NULL,
-    master_id        BIGINT      NOT NULL,
+    ID          BIGSERIAL PRIMARY KEY,
+    MASTER_ID   BIGINT    NOT NULL,
+    SHIFT_START TIMESTAMP NOT NULL, -- Date and time when the specific shift begins
+    SHIFT_END   TIMESTAMP NOT NULL, -- Date and time when the specific shift concludes
+    CREATED_AT  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- Semantic validation rule enforcing strict timeline chronology
+    CONSTRAINT CHK_SHIFT_CHRONOLOGY_MUST_BE_VALID CHECK (SHIFT_END > SHIFT_START),
+
+    -- Semantic Foreign Key: Work calendar schedule belongs to a live stylist.
+    -- Clears out shifts automatically if a master record profile drops out of existence.
+    CONSTRAINT FK_SHIFT_ASSIGNED_TO_SALON_MASTER FOREIGN KEY (MASTER_ID)
+        REFERENCES MASTERS (ID) ON DELETE CASCADE
+);
+
+-- Compound index optimizing calendar availability queries and scheduling logic sweeps
+CREATE INDEX IDX_MASTER_SHIFTS_RANGE ON MASTER_SHIFTS (MASTER_ID, SHIFT_START, SHIFT_END);
+
+
+-- =====================================================================
+-- 4. ТАБЛИЦА СЕАНСОВ ЗАПИСЕЙ (РАСПИСАНИЕ ВИЗИТОВ)
+-- =====================================================================
+CREATE TABLE APPOINTMENTS
+(
+    ID               BIGSERIAL PRIMARY KEY,
+    CLIENT_ID        BIGINT      NOT NULL,
+    MASTER_ID        BIGINT      NOT NULL,
     appointment_time TIMESTAMP   NOT NULL,
-    duration_minutes INT         NOT NULL DEFAULT 60,
-    status           VARCHAR(32) NOT NULL, -- 'AI_PENDING', 'APPROVED', 'CANCELED'
-    created_at       TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    DURATION_MINUTES INT         NOT NULL DEFAULT 60,
+    STATUS           VARCHAR(32) NOT NULL, -- 'AI_PENDING', 'APPROVED', 'CANCELED'
+    CREATED_AT       TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    -- СЕМАНТИЧЕСКИЕ ВНЕШНИЕ КЛЮЧИ:
-    -- Каждая запись жестко связывает конкретного гостя чат-бота с выбранным мастером расписания.
-    -- Запрещаем случайное удаление мастера (RESTRICT), если к нему уже записаны люди,
-    -- но позволяем каскадно удалять записи (CASCADE), если из системы стирается сам анонимный профиль клиента.
-    CONSTRAINT fk_appointment_belongs_to_conversational_client FOREIGN KEY (client_id)
-        REFERENCES clients (id) ON DELETE CASCADE,
+    -- Semantic Foreign Keys: Links a messaging client account with a salon stylist record.
+    -- Blocks a master removal if they have active appointments scheduled (RESTRICT).
+    CONSTRAINT FK_APPOINTMENT_BELONGS_TO_CONVERSATIONAL_CLIENT FOREIGN KEY (CLIENT_ID)
+        REFERENCES CLIENTS (ID) ON DELETE CASCADE,
 
-    CONSTRAINT fk_appointment_assigned_to_salon_master FOREIGN KEY (master_id)
-        REFERENCES masters (id) ON DELETE RESTRICT
+    CONSTRAINT FK_APPOINTMENT_ASSIGNED_TO_SALON_MASTER FOREIGN KEY (MASTER_ID)
+        REFERENCES MASTERS (ID) ON DELETE RESTRICT
 );
 
--- Индексы для мгновенного поиска накладок времени и построения шахматки расписания
-CREATE INDEX idx_appointments_schedule ON appointments (master_id, appointment_time);
-CREATE INDEX idx_appointments_client ON appointments (client_id);
+CREATE INDEX IDX_APPOINTMENTS_SCHEDULE ON APPOINTMENTS (MASTER_ID, appointment_time);
+CREATE INDEX IDX_APPOINTMENTS_CLIENT ON APPOINTMENTS (CLIENT_ID);
 
 
 -- =====================================================================
--- 4. ПОЛНОСТЬЮ НОРМАЛИЗОВАННЫЙ ЖУРНАЛ АУДИТА ПЕРЕПИСКИ
+-- 5. ПОЛНОСТЬЮ НОРМАЛИЗОВАННЫЙ ЖУРНАЛ АУДИТА ПЕРЕПИСКИ
 -- =====================================================================
-CREATE TABLE message_traces
+CREATE TABLE MESSAGE_TRACES
 (
-    id           BIGSERIAL PRIMARY KEY,
-    client_id    BIGINT,               -- Может быть NULL для Phase 1 (анонимный входящий POST пакет)
-    trace_id     VARCHAR(64) NOT NULL, -- Сквозной диагностический маркер (MDC)
-    direction    VARCHAR(16) NOT NULL, -- 'INBOUND', 'OUTBOUND'
-    raw_payload  TEXT,                 -- Сырой JSON входящего вебхука (только для INBOUND)
-    message_text TEXT        NOT NULL, -- Чистый читаемый текст сообщения
-    created_at   TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ID           BIGSERIAL PRIMARY KEY,
+    CLIENT_ID    BIGINT,               -- Nullable for early Phase 1 trace intercept tracking
+    TRACE_ID     VARCHAR(64) NOT NULL, -- Cross-cutting trace logging token (MDC)
+    DIRECTION    VARCHAR(16) NOT NULL, -- 'INBOUND', 'OUTBOUND'
+    RAW_PAYLOAD  TEXT,                 -- Inbound payload capture frame
+    MESSAGE_TEXT TEXT        NOT NULL, -- Sanitized operational text representation
+    CREATED_AT   TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    -- СЕМАНТИЧЕСКИЙ ВНЕШНИЙ КЛЮЧ: Каждая строка переписки привязана к истории конкретного аккаунта
-    CONSTRAINT fk_trace_belongs_to_conversational_client FOREIGN KEY (client_id)
-        REFERENCES clients (id) ON DELETE CASCADE
+    CONSTRAINT FK_TRACE_BELONGS_TO_CONVERSATIONAL_CLIENT FOREIGN KEY (CLIENT_ID)
+        REFERENCES CLIENTS (ID) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_msg_traces_trace_id ON message_traces (trace_id);
+CREATE INDEX IDX_MSG_TRACES_TRACE_ID ON MESSAGE_TRACES (TRACE_ID);
