@@ -56,8 +56,9 @@ public class MessageTraceServiceImplTest {
 
     // Подготавливаем чистую родительскую запись для беспрепятственной привязки внешних ключей
     dsl.insertInto(CLIENTS)
-        .set(CLIENTS.FIRST_NAME, "Natalia")
-        .set(CLIENTS.TELEGRAM_ID, testPlatformId)
+        .set(CLIENTS.PLATFORM_TYPE, PlatformType.TELEGRAM.name()) // Set multi-channel classifier
+        .set(CLIENTS.PLATFORM_ID, testPlatformId)
+        .set(CLIENTS.DISPLAY_NAME, "Natalia") // Updated from FIRST_NAME to DISPLAY_NAME
         .execute();
   }
 
@@ -86,7 +87,6 @@ public class MessageTraceServiceImplTest {
     MDC.put("traceId", currentTestTraceId);
 
     // Arrange: Настраиваем бизнес-параметры сообщения для проверки персистентности
-    // Arrange
     String testTraceId = "TX-DB-TEST-777";
     String sampleText = "Проверка записи сквозного доменного журнала";
 
@@ -109,11 +109,20 @@ public class MessageTraceServiceImplTest {
 
     var savedLog = record.get();
     assertEquals(testTraceId, savedLog.getTraceId());
-    assertEquals(PlatformType.TELEGRAM.name(), savedLog.getPlatformType());
-    assertEquals(testPlatformId, savedLog.getPlatformId());
     assertEquals("INBOUND", savedLog.getDirection());
     assertEquals(sampleText, savedLog.getMessageText());
+
+    // ВАЖНО: Верифицируем, что суррогатный внешний ключ успешно привязался
     assertNotNull(savedLog.getClientId(), "Суррогатный внешний ключ client_id должен автоматически связаться.");
+
+    // Подтверждаем корректность связки, вычитывая данные родительского профиля через полученный ID
+    var linkedClient = dsl.selectFrom(CLIENTS)
+        .where(CLIENTS.ID.eq(savedLog.getClientId()))
+        .fetchOne();
+
+    assertNotNull(linkedClient);
+    assertEquals("Natalia", linkedClient.getDisplayName());
+    assertEquals(testPlatformId, linkedClient.getPlatformId());
   }
 
 }

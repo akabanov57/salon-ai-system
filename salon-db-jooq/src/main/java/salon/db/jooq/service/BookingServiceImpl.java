@@ -21,6 +21,7 @@ import salon.api.model.Appointment;
 import salon.api.model.AppointmentStatus;
 import salon.api.model.Client;
 import salon.api.model.Master;
+import salon.api.model.PlatformType;
 import salon.api.model.ProcessMessageCommand;
 import salon.api.service.BookingService;
 
@@ -61,36 +62,48 @@ final class BookingServiceImpl implements BookingService {
     return new StorageInfrastructureException(contextMessage + ": Internal data storage layer error encountered.", ex);
   }
 
-  private Client txIdOrCreateTelegramClientInternal(DSLContext txCtx, String telegramId, String firstName) {
-    log.info("Business Step: Identifying TG client [{}] inside transactional bounds", telegramId);
+  /**
+   * Выполняет поиск или генерацию профиля клиента с применением безопасной NOT NULL заглушки.
+   */
+  private Client txIdOrCreateClientInternal(DSLContext txCtx, PlatformType platformType, String platformId, String displayName) {
+    log.info("Business Step: Identifying multi-channel client [{}] on platform [{}] inside transactional bounds",
+        platformId, platformType);
 
-    // FIX: Enforce a safe business fallback handle if the messaging platform hides the user's name
-    // TODO Поддержка языка.
-    final String resolvedName = (firstName == null || firstName.isBlank()) ? "Guest" : firstName;
+    // Отсекаем пробельный мусор и подставляем вежливый дефолтный маркер "Guest"
+    final String resolvedName = (displayName == null || displayName.isBlank()) ? "Guest" : displayName.trim();
 
-    // Natively stream the mapping conversion or execute the insert fallback block cleanly
+    // Поиск по нормализованному составному индексу в верхнем регистре
     return txCtx.selectFrom(CLIENTS)
-        .where(CLIENTS.TELEGRAM_ID.eq(telegramId))
+        .where(CLIENTS.PLATFORM_TYPE.eq(platformType.name()))
+        .and(CLIENTS.PLATFORM_ID.eq(platformId))
         .fetchOptional()
         .map(r -> new Client(
-            r.getId(), r.getFirstName(), r.getLastName(), r.getPhone(),
-            r.getTelegramId(), r.getInstagramId(), r.getBonusBalance(), r.getCreatedAt()
+            r.getId(),
+            r.getPlatformType(),
+            r.getPlatformId(),
+            r.getDisplayName(),
+            r.getBonusBalance(),
+            r.getCreatedAt()
         ))
         .orElseGet(() -> {
-          // FALLBACK PHASE: Triggers seamlessly only if the optional wrapper is empty!
-          log.info("New client discovered. Generating profile for {}", firstName);
+          log.info("New multi-channel client discovered. Generating profile footprint for: {}", resolvedName);
+
           var newRecord = txCtx.insertInto(CLIENTS)
-              .set(CLIENTS.FIRST_NAME, resolvedName)
-              .set(CLIENTS.TELEGRAM_ID, telegramId)
+              .set(CLIENTS.PLATFORM_TYPE, platformType.name())
+              .set(CLIENTS.PLATFORM_ID, platformId)
+              .set(CLIENTS.DISPLAY_NAME, resolvedName)
               .returning()
               .fetchOne();
 
           Objects.requireNonNull(newRecord, "Database failed to return the newly inserted client record.");
 
           return new Client(
-              newRecord.getId(), newRecord.getFirstName(), newRecord.getLastName(),
-              newRecord.getPhone(), newRecord.getTelegramId(), newRecord.getInstagramId(),
-              newRecord.getBonusBalance(), newRecord.getCreatedAt()
+              newRecord.getId(),
+              newRecord.getPlatformType(),
+              newRecord.getPlatformId(),
+              newRecord.getDisplayName(),
+              newRecord.getBonusBalance(),
+              newRecord.getCreatedAt()
           );
         });
   }
@@ -101,26 +114,31 @@ final class BookingServiceImpl implements BookingService {
         command.platformType(), command.platformId());
 
     try {
+      // Инициализируем неделимую трансляционную транзакцию высшего уровня
       dslCtx.transaction(configuration -> {
         DSLContext txCtx = configuration.dsl();
 
-        // Идентифицируем клиента
-        Client client = txIdOrCreateTelegramClientInternal(txCtx, command.platformId(), command.firstName());
+        // 1. Идентифицируем или создаем нормализованного клиента в базе
+        Client client = txIdOrCreateClientInternal(
+            txCtx,
+            command.platformType(),
+            command.platformId(),
+            command.displayName()
+        );
 
-        // Прямая атомарная вставка лога
+        // 2. Выполняем прямую атомарную вставку входящего лога в текущей транзакции
         txCtx.insertInto(MESSAGE_TRACES)
             .set(MESSAGE_TRACES.TRACE_ID, command.traceId())
-            .set(MESSAGE_TRACES.PLATFORM_TYPE, command.platformType().name())
-            .set(MESSAGE_TRACES.PLATFORM_ID, command.platformId())
             .set(MESSAGE_TRACES.DIRECTION, "INBOUND")
             .set(MESSAGE_TRACES.MESSAGE_TEXT, command.messageText())
             .set(MESSAGE_TRACES.CLIENT_ID, client.id())
             .execute();
+
+        log.debug("[Domain Use-Case] Входящий лог транзакции {} успешно сохранен.", command.traceId());
       });
     } catch (Exception ex) {
-      // ...но этот блок моментально ПЕРЕХВАТИТ этот NPE!
-      // И превратит его в чистое доменное исключение, скрыв технический мусор.
-      throw translateException("Failed to identify or create Telegram client profile", ex);
+      // Перехватываем технический мусор jOOQ и превращаем его в чистое доменное исключение
+      throw translateException("Failed to identify or create multi-channel client profile", ex);
     }
   }
 
@@ -134,62 +152,54 @@ final class BookingServiceImpl implements BookingService {
   }
 
   @Override
-  public Optional<Appointment> tryAiBooking(Long clientId, Long masterId, LocalDateTime time, int durationMinutes) {
-    log.info("Business Step: Attempting AI slot reservation for master {} starting at {}", masterId, time);
+  public Optional<Appointment> tryAiBooking(Long clientId, Long masterId, LocalDateTime appointmentTime, int durationMinutes) {
+    log.info("Database Step: Attempting provisional AI booking for master [{}] at [{}]", masterId, appointmentTime);
 
     try {
-      LocalDateTime endTime = time.plusMinutes(durationMinutes);
-      // Orchestrate the query logic inside an atomic, thread-safe jOOQ transaction pipeline
+      // Открываем транзакционный контекст для полной изоляции и исключения Race Condition
       return dslCtx.transactionResult(configuration -> {
         DSLContext txCtx = configuration.dsl();
+        LocalDateTime endTime = appointmentTime.plusMinutes(durationMinutes);
 
-        // 1. Check for time-slot overlap using the mathematical grid allocation logic:
-        // (RequestedStart < ExistingEnd) AND (RequestedEnd > ExistingStart)
-        boolean overlapExists = txCtx.fetchExists(
+        // Вычисляем накладки времени с использованием заглавных полей метамодели jOOQ
+        boolean hasClash = txCtx.fetchExists(
             txCtx.selectFrom(APPOINTMENTS)
                 .where(APPOINTMENTS.MASTER_ID.eq(masterId))
-                .and(APPOINTMENTS.STATUS.ne(AppointmentStatus.CANCELED.name()))
+                .and(APPOINTMENTS.STATUS.ne("CANCELED"))
                 .and(APPOINTMENTS.APPOINTMENT_TIME.lt(endTime))
-                // Computes column multiplications directly inside the native query engine
-                .and(APPOINTMENTS.APPOINTMENT_TIME.plus(APPOINTMENTS.DURATION_MINUTES.mul(60)).gt(time))
+                .and(APPOINTMENTS.APPOINTMENT_TIME.add(APPOINTMENTS.DURATION_MINUTES.multiply(1)).gt(appointmentTime))
         );
 
-        if (overlapExists) {
-          log.warn("Aborting reservation pipeline: Time slot conflict detected for master {} at {}", masterId, time);
+        if (hasClash) {
+          log.warn("Database Step: Conflict discovered. Slot at [{}] for master [{}] is occupied.", appointmentTime, masterId);
           return Optional.empty();
         }
 
-        // 2. The slot is vacant — perform the insert execution block
-        var newAppRecord = txCtx.insertInto(APPOINTMENTS)
+        // Создаем предварительную бронь в статусе черновика AI_PENDING
+        var record = txCtx.insertInto(APPOINTMENTS)
             .set(APPOINTMENTS.CLIENT_ID, clientId)
             .set(APPOINTMENTS.MASTER_ID, masterId)
-            .set(APPOINTMENTS.APPOINTMENT_TIME, time)
+            .set(APPOINTMENTS.APPOINTMENT_TIME, appointmentTime)
             .set(APPOINTMENTS.DURATION_MINUTES, durationMinutes)
-            .set(APPOINTMENTS.STATUS, AppointmentStatus.AI_PENDING.name())
-            .returning() // Auto-hydrates database constraints like generated IDs and timestamps
+            .set(APPOINTMENTS.STATUS, "AI_PENDING")
+            .returning()
             .fetchOne();
 
-        // Clean Fail-Fast check: Intercept empty return patterns to protect against silent failures
-        Objects.requireNonNull(newAppRecord, "Database state failure: Returned a null row during appointment insertion allocation.");
+        Objects.requireNonNull(record, "Database failed to persist the provisional appointment frame.");
 
-        // 3. Map safely to our clean, immutable domain Record to shield underlying tables
-        Appointment appointment = new Appointment(
-            newAppRecord.getId(),
-            newAppRecord.getClientId(),
-            newAppRecord.getMasterId(),
-            newAppRecord.getAppointmentTime(),
-            newAppRecord.getDurationMinutes(),
-            AppointmentStatus.valueOf(newAppRecord.getStatus()),
-            newAppRecord.getPrice(),
-            newAppRecord.getCreatedAt()
-        );
-
-        log.info("Successfully reserved pending appointment slot. Generated Ticket ID: {}", appointment.id());
-        return Optional.of(appointment);
+        return Optional.of(new Appointment(
+            record.getId(),
+            record.getClientId(),
+            record.getMasterId(),
+            record.getAppointmentTime(),
+            record.getDurationMinutes(),
+            AppointmentStatus.valueOf(record.getStatus()), // FIX: jOOQ уже возвращает чистый AppointmentStatus!
+            null,               // serviceNotes (пока оставляем null на этом этапе визита)
+            record.getCreatedAt()
+        ));
       });
     } catch (Exception ex) {
-      // Catch both jOOQ SQL failures and internal NullPointerExceptions, then map to domain space
-      throw translateException("Failed to complete conversational AI appointment scheduling flow", ex);
+      throw translateException("Failed to execute transactional AI slot reservation safety loop", ex);
     }
   }
 

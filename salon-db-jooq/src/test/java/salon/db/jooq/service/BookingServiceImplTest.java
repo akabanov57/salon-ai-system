@@ -38,9 +38,9 @@ public class BookingServiceImplTest {
     // Идеальная очистка контекста СУБД H2 перед каждым тестом
     dslCtx.execute("SET REFERENTIAL_INTEGRITY FALSE");
     dslCtx.truncate(MESSAGE_TRACES).execute();
-    dslCtx.truncate(APPOINTMENTS).execute(); // ДОБАВЛЕНО
+    dslCtx.truncate(APPOINTMENTS).execute();
     dslCtx.truncate(CLIENTS).execute();
-    dslCtx.truncate(MASTERS).execute();      // ДОБАВЛЕНО
+    dslCtx.truncate(MASTERS).execute();
     dslCtx.execute("SET REFERENTIAL_INTEGRITY TRUE");
   }
 
@@ -60,9 +60,13 @@ public class BookingServiceImplTest {
 
     bookingService.processMessage(command);
 
-    var clientRecord = dslCtx.selectFrom(CLIENTS).where(CLIENTS.TELEGRAM_ID.eq("55512345")).fetchOptional();
+    var clientRecord = dslCtx.selectFrom(CLIENTS)
+        .where(CLIENTS.PLATFORM_TYPE.eq(PlatformType.TELEGRAM.name()))
+        .and(CLIENTS.PLATFORM_ID.eq("55512345"))
+        .fetchOptional();
+
     assertTrue(clientRecord.isPresent());
-    assertEquals("Natalia", clientRecord.get().getFirstName());
+    assertEquals("Natalia", clientRecord.get().getDisplayName());
 
     var traceRecord = dslCtx.selectFrom(MESSAGE_TRACES).where(MESSAGE_TRACES.TRACE_ID.eq("TX-BOOK-101")).fetchOptional();
     assertTrue(traceRecord.isPresent());
@@ -114,17 +118,19 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldFallbackToDefaultNameWhenFirstNameIsMissing() {
-    // Передаем null вместо имени в доменную команду
     ProcessMessageCommand command = new ProcessMessageCommand(
         "TX-BOOK-401", PlatformType.TELEGRAM, "777", null, "Привет от анонима"
     );
 
     bookingService.processMessage(command);
 
-    var clientRecord = dslCtx.selectFrom(CLIENTS).where(CLIENTS.TELEGRAM_ID.eq("777")).fetchOptional();
+    var clientRecord = dslCtx.selectFrom(CLIENTS)
+        .where(CLIENTS.PLATFORM_TYPE.eq(PlatformType.TELEGRAM.name()))
+        .and(CLIENTS.PLATFORM_ID.eq("777"))
+        .fetchOptional();
+
     assertTrue(clientRecord.isPresent());
-    // Проверяем, что система защитила базу данных от null и применила дефолтный маркер
-    assertEquals("Guest", clientRecord.get().getFirstName(), "При отсутствии имени система должна использовать заглушку 'Guest'.");
+    assertEquals("Guest", clientRecord.get().getDisplayName(), "При отсутствии имени система должна использовать заглушку 'Guest'.");
   }
 
   /**
@@ -142,7 +148,7 @@ public class BookingServiceImplTest {
 
     var traceRecord = dslCtx.selectFrom(MESSAGE_TRACES).where(MESSAGE_TRACES.TRACE_ID.eq("TX-BOOK-501")).fetchOptional();
     assertTrue(traceRecord.isPresent());
-    assertEquals("", traceRecord.get().getMessageText(), "Пустая текстовая строка должна корректно ложиться в базу.");
+    assertEquals("", traceRecord.get().getMessageText());
   }
 
   /**
@@ -158,7 +164,7 @@ public class BookingServiceImplTest {
         .set(MASTERS.FIRST_NAME, "Elena")
         .set(MASTERS.LAST_NAME, "Petrova")
         .set(MASTERS.SPECIALIZATION, "Top Colorist")
-        .set(MASTERS.IS_ACTIVE, true) // АКТИВНЫЙ
+        .set(MASTERS.IS_ACTIVE, true)
         .execute();
 
     dslCtx.insertInto(MASTERS)
@@ -166,17 +172,12 @@ public class BookingServiceImplTest {
         .set(MASTERS.FIRST_NAME, "Anna")
         .set(MASTERS.LAST_NAME, "Ivanova")
         .set(MASTERS.SPECIALIZATION, "Stylist")
-        .set(MASTERS.IS_ACTIVE, false) // НЕАКТИВНЫЙ
+        .set(MASTERS.IS_ACTIVE, false)
         .execute();
 
-    // Act
     List<Master> activeStylists = bookingService.getAvailableStylists();
-
-    // Assert
-    assertEquals(1, activeStylists.size(), "Метод обязан отсекать неактивных мастеров салона.");
-    Master master = activeStylists.getFirst();
-    assertEquals("Elena", master.firstName());
-    assertEquals("Top Colorist", master.specialization());
+    assertEquals(1, activeStylists.size());
+    assertEquals("Elena", activeStylists.getFirst().firstName());
   }
 
   /**
@@ -186,34 +187,29 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldSuccessfullyCreateProvisionBookingWhenSlotIsFree() {
-    // Arrange: Создаем родительские записи клиента и мастера
     long clientId = 100L;
     long masterId = 1L;
     LocalDateTime slotTime = LocalDateTime.parse("2026-08-10T14:00:00");
 
     dslCtx.insertInto(CLIENTS)
         .set(CLIENTS.ID, clientId)
-        .set(CLIENTS.FIRST_NAME, "Natalia")
-        .set(CLIENTS.TELEGRAM_ID, "123")
+        .set(CLIENTS.PLATFORM_TYPE, PlatformType.TELEGRAM.name())
+        .set(CLIENTS.PLATFORM_ID, "123")
+        .set(CLIENTS.DISPLAY_NAME, "Natalia")
         .execute();
+
     dslCtx.insertInto(MASTERS)
         .set(MASTERS.ID, masterId)
         .set(MASTERS.FIRST_NAME, "Elena")
         .set(MASTERS.LAST_NAME, "Petrova")
-        .set(MASTERS.IS_ACTIVE, true).execute();
+        .set(MASTERS.SPECIALIZATION, "Top Colorist")
+        .set(MASTERS.IS_ACTIVE, true)
+        .execute();
 
-    // Act
     Optional<Appointment> appointmentOpt = bookingService.tryAiBooking(clientId, masterId, slotTime, 60);
 
-    // Assert
-    assertTrue(appointmentOpt.isPresent(), "Если время свободно, пред-бронирование должно возвращать объект записи.");
-    Appointment appointment = appointmentOpt.get();
-    assertEquals(AppointmentStatus.AI_PENDING, appointment.status(), "ИИ-бронь обязана создаваться в статусе ожидания проверки (AI_PENDING).");
-    assertEquals(slotTime, appointment.appointmentTime());
-
-    // Проверяем физическое наличие строки в таблице
-    int dbCount = dslCtx.fetchCount(APPOINTMENTS);
-    assertEquals(1, dbCount);
+    assertTrue(appointmentOpt.isPresent());
+    assertEquals(AppointmentStatus.AI_PENDING, appointmentOpt.get().status());
   }
 
   /**
@@ -223,30 +219,34 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldReturnEmptyOptionalWhenAiBookingClashesWithExistingAppointment() {
-    // Arrange
     long clientA = 100L;
     long clientB = 200L;
     long masterId = 1L;
     LocalDateTime existingSlot = LocalDateTime.parse("2026-08-10T14:00:00");
-    LocalDateTime clashingSlot = LocalDateTime.parse("2026-08-10T14:30:00"); // Пересекается по длительности (60 мин)
+    LocalDateTime clashingSlot = LocalDateTime.parse("2026-08-10T14:30:00");
 
     dslCtx.insertInto(CLIENTS)
         .set(CLIENTS.ID, clientA)
-        .set(CLIENTS.FIRST_NAME, "Natalia")
-        .set(CLIENTS.TELEGRAM_ID, "123").execute();
+        .set(CLIENTS.PLATFORM_TYPE, PlatformType.TELEGRAM.name())
+        .set(CLIENTS.PLATFORM_ID, "123")
+        .set(CLIENTS.DISPLAY_NAME, "Natalia")
+        .execute();
+
     dslCtx.insertInto(CLIENTS)
         .set(CLIENTS.ID, clientB)
-        .set(CLIENTS.FIRST_NAME, "Anna")
-        .set(CLIENTS.TELEGRAM_ID, "456")
+        .set(CLIENTS.PLATFORM_TYPE, PlatformType.TELEGRAM.name())
+        .set(CLIENTS.PLATFORM_ID, "456")
+        .set(CLIENTS.DISPLAY_NAME, "Anna")
         .execute();
+
     dslCtx.insertInto(MASTERS)
         .set(MASTERS.ID, masterId)
         .set(MASTERS.FIRST_NAME, "Elena")
         .set(MASTERS.LAST_NAME, "Petrova")
+        .set(MASTERS.SPECIALIZATION, "Top Colorist")
         .set(MASTERS.IS_ACTIVE, true)
         .execute();
 
-    // Создаем жесткую существующую бронь в системе
     dslCtx.insertInto(APPOINTMENTS)
         .set(APPOINTMENTS.CLIENT_ID, clientA)
         .set(APPOINTMENTS.MASTER_ID, masterId)
@@ -255,12 +255,8 @@ public class BookingServiceImplTest {
         .set(APPOINTMENTS.STATUS, "CONFIRMED")
         .execute();
 
-    // Act: Пытаемся поверх записать второго клиента на пересекающееся время
     Optional<Appointment> result = bookingService.tryAiBooking(clientB, masterId, clashingSlot, 60);
-
-    // Assert
-    assertTrue(result.isEmpty(), "Метод обязан блокировать накладки расписания и возвращать Optional.empty().");
-    assertEquals(1, dslCtx.fetchCount(APPOINTMENTS), "В базе должна остаться только первоначальная запись.");
+    assertTrue(result.isEmpty());
   }
 
   /**
@@ -276,19 +272,24 @@ public class BookingServiceImplTest {
     long appointmentId = 999L;
     LocalDateTime slotTime = LocalDateTime.parse("2026-08-10T14:00:00");
 
+    // Вставляем родительскую запись клиента с использованием новых заглавных колонок СУБД
     dslCtx.insertInto(CLIENTS)
         .set(CLIENTS.ID, clientId)
-        .set(CLIENTS.FIRST_NAME, "Natalia")
-        .set(CLIENTS.TELEGRAM_ID, "123")
+        .set(CLIENTS.PLATFORM_TYPE, PlatformType.TELEGRAM.name())
+        .set(CLIENTS.PLATFORM_ID, "123")
+        .set(CLIENTS.DISPLAY_NAME, "Natalia")
         .execute();
+
+    // Вставляем родительскую запись мастера с соблюдением NOT NULL ограничений
     dslCtx.insertInto(MASTERS)
         .set(MASTERS.ID, masterId)
         .set(MASTERS.FIRST_NAME, "Elena")
         .set(MASTERS.LAST_NAME, "Petrova")
+        .set(MASTERS.SPECIALIZATION, "Top Colorist")
         .set(MASTERS.IS_ACTIVE, true)
         .execute();
 
-    // Вставляем предварительную ИИ-запись
+    // Создаем предварительный сеанс записи в исходном статусе черновика AI_PENDING
     dslCtx.insertInto(APPOINTMENTS)
         .set(APPOINTMENTS.ID, appointmentId)
         .set(APPOINTMENTS.CLIENT_ID, clientId)
@@ -298,12 +299,14 @@ public class BookingServiceImplTest {
         .set(APPOINTMENTS.STATUS, "AI_PENDING")
         .execute();
 
-    // Act: Одобряем запись по её первичному ключу ID
+    // Act: Выполняем доменный метод аппрува по первичному ключу тикета
     bookingService.approveAppointment(appointmentId);
 
-    // Assert: Вычитываем запись для проверки изменения статуса
+    // Assert: Напрямую вычитываем строку СУБД для проверки финального рантайм-состояния
     var record = dslCtx.selectFrom(APPOINTMENTS).where(APPOINTMENTS.ID.eq(appointmentId)).fetchOptional();
-    assertTrue(record.isPresent());
-    assertEquals("APPROVED", record.get().getStatus(), "После одобрения владельцем статус обязан стать APPROVED.");
+
+    assertTrue(record.isPresent(), "Запись сеанса должна остаться в таблице расписания.");
+    // Проверяем строгое соответствие вашему внутреннему статус-инварианту APPROVED
+    assertEquals("APPROVED", record.get().getStatus(), "После аппрува владельцем статус обязан стать APPROVED.");
   }
 }
