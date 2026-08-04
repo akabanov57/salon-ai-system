@@ -12,6 +12,13 @@ import salon.ai.engine.internal.service.BookingTools;
 import salon.api.model.Master;
 import salon.api.service.BookingService;
 
+/**
+ * <h2>Инструменты ИИ-ассистента для работы с СУБД (LangChain4j Tools)</h2>
+ * <p>
+ * Реализует интерфейс {@code BookingTools}. Обеспечивает динамический
+ * доступ нейросетевого ядра к расписанию мастеров салона красоты.
+ * </p>
+ */
 @Singleton
 final class BookingToolsImpl implements BookingTools {
 
@@ -26,13 +33,19 @@ final class BookingToolsImpl implements BookingTools {
   @Tool("Retrieves a complete list of all active hair stylists, masters, and colorists along with their specialties.")
   @Override
   public String getAvailableStylists() {
-    log.info("AI Tool Invocation: Fetching active stylists grid");
-    final List<Master> masters = bookingService.getAvailableStylists();
+    log.info("AI Tool: Intercepted request to fetch active stylists grid for today.");
+
+    final LocalDateTime today = LocalDateTime.now();
+    final List<Master> masters = bookingService.getActiveMastersForDate(today);
+
     if (masters.isEmpty()) {
       return "Currently, there are no active stylists registered in the salon schedule system.";
     }
+
+    // ЭТАЛОННЫЙ ДЕКЛАРАТИВНЫЙ СТРИМ-ВАРИАНТ С ИСПРАВЛЕННЫМ SPECIALIZATION()
     return masters.stream()
-        .map(m -> String.format("ID: %d | Name: %s %s | Specialty: %s", m.id(), m.firstName(), m.lastName(), m.specialization()))
+        .map(m -> String.format("ID: %d | Name: %s %s | Specialty: %s",
+            m.id(), m.firstName(), m.lastName(), m.specialization()))
         .collect(Collectors.joining("\n"));
   }
 

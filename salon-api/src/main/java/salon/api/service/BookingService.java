@@ -20,11 +20,6 @@ public interface BookingService {
   void processMessage(ProcessMessageCommand command);
 
   /**
-   * Возвращает список всех работающих мастеров для ИИ-подсказок или сетки GUI.
-   */
-  List<Master> getAvailableStylists();
-
-  /**
    * Пытается забронировать предварительное время (AI_PENDING).
    * Автоматически проверяет наложение окон (Overlapping) на уровне бизнес-логики.
    *
@@ -36,4 +31,16 @@ public interface BookingService {
    * Сценарий для Владельца (Вашей жены): Одобрить запись из Vaadin GUI.
    */
   void approveAppointment(Long appointmentId);
+
+  /**
+   * <h3>Бизнес-метод: Получение всех мастеров, работающих в выбранный день</h3>
+   * Позволяет ИИ-ассистенту ориентировать клиентов по доступному на сегодня штату специалистов.
+   */
+  List<Master> getActiveMastersForDate(LocalDateTime date);
+
+  /**
+   * <h3>Бизнес-метод: Проверка фактической занятости и доступности мастера</h3>
+   * Вычисляет, находится ли мастер на рабочей смене и свободен ли запрашиваемый временной интервал.
+   */
+  boolean isMasterAvailableAt(Long masterId, LocalDateTime time, int durationMinutes);
 }

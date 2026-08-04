@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static salon.db.jooq.generated.Tables.APPOINTMENTS;
 import static salon.db.jooq.generated.Tables.CLIENTS;
 import static salon.db.jooq.generated.Tables.MASTERS;
+import static salon.db.jooq.generated.Tables.MASTER_SHIFTS;
 import static salon.db.jooq.generated.Tables.MESSAGE_TRACES;
 
 import io.avaje.inject.test.InjectTest;
@@ -39,6 +40,7 @@ public class BookingServiceImplTest {
     dslCtx.execute("SET REFERENTIAL_INTEGRITY FALSE");
     dslCtx.truncate(MESSAGE_TRACES).execute();
     dslCtx.truncate(APPOINTMENTS).execute();
+    dslCtx.truncate(MASTER_SHIFTS).execute(); // FIX: Added explicit work shifts reset!
     dslCtx.truncate(CLIENTS).execute();
     dslCtx.truncate(MASTERS).execute();
     dslCtx.execute("SET REFERENTIAL_INTEGRITY TRUE");
@@ -158,32 +160,51 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldReturnOnlyActiveStylistsWhenQueried() {
-    // Arrange: Напрямую вставляем одного активного мастера и одного уволенного/неактивного
+    // Arrange
+    LocalDateTime targetDate = LocalDateTime.parse("2026-08-10T12:00:00");
+
+    // Мастер 1: Работает 10 августа
     dslCtx.insertInto(MASTERS)
         .set(MASTERS.ID, 1L)
         .set(MASTERS.FIRST_NAME, "Elena")
         .set(MASTERS.LAST_NAME, "Petrova")
         .set(MASTERS.SPECIALIZATION, "Top Colorist")
-        .set(MASTERS.IS_ACTIVE, true)
         .execute();
 
+    dslCtx.insertInto(MASTER_SHIFTS)
+        .set(MASTER_SHIFTS.MASTER_ID, 1L)
+        .set(MASTER_SHIFTS.SHIFT_START, LocalDateTime.parse("2026-08-10T10:00:00"))
+        .set(MASTER_SHIFTS.SHIFT_END, LocalDateTime.parse("2026-08-10T20:00:00"))
+        .execute();
+
+    // Мастер 2: Выходной (работает в другой день)
     dslCtx.insertInto(MASTERS)
         .set(MASTERS.ID, 2L)
         .set(MASTERS.FIRST_NAME, "Anna")
         .set(MASTERS.LAST_NAME, "Ivanova")
         .set(MASTERS.SPECIALIZATION, "Stylist")
-        .set(MASTERS.IS_ACTIVE, false)
         .execute();
 
-    List<Master> activeStylists = bookingService.getAvailableStylists();
-    assertEquals(1, activeStylists.size());
-    assertEquals("Elena", activeStylists.getFirst().firstName());
+    dslCtx.insertInto(MASTER_SHIFTS)
+        .set(MASTER_SHIFTS.MASTER_ID, 2L)
+        .set(MASTER_SHIFTS.SHIFT_START, LocalDateTime.parse("2026-08-11T10:00:00"))
+        .set(MASTER_SHIFTS.SHIFT_END, LocalDateTime.parse("2026-08-11T20:00:00"))
+        .execute();
+
+    // Act
+    final List<Master> activeStylists = bookingService.getActiveMastersForDate(targetDate);
+
+    // Assert
+    assertEquals(1, activeStylists.size(), "Система обязана возвращать только мастеров со сменами на указанную дату.");
+    final Master master = activeStylists.getFirst();
+    assertEquals("Elena", master.firstName());
+    assertEquals("Top Colorist", master.specialization());
   }
 
   /**
    * <h3>Тест 7: Успешное предварительное ИИ-бронирование слота</h3>
-   * <p><b>Бизнес-контекст:</b> ИИ подобрал свободное время для клиента и пытается его занять.
-   * Слот свободен, запись создается в статусе пред-проверки AI_PENDING.</p>
+   * <p><b>Бизнес-контекст:</b> ИИ бронирует свободный слот, который полностью попадает
+   * внутрь официально опубликованной рабочей смены мастера.</p>
    */
   @Test
   void shouldSuccessfullyCreateProvisionBookingWhenSlotIsFree() {
@@ -191,6 +212,7 @@ public class BookingServiceImplTest {
     long masterId = 1L;
     LocalDateTime slotTime = LocalDateTime.parse("2026-08-10T14:00:00");
 
+    // 1. Создаем родительский профиль клиента
     dslCtx.insertInto(CLIENTS)
         .set(CLIENTS.ID, clientId)
         .set(CLIENTS.PLATFORM_TYPE, PlatformType.TELEGRAM.name())
@@ -198,17 +220,26 @@ public class BookingServiceImplTest {
         .set(CLIENTS.DISPLAY_NAME, "Natalia")
         .execute();
 
+    // 2. Создаем родительский профиль мастера
     dslCtx.insertInto(MASTERS)
         .set(MASTERS.ID, masterId)
         .set(MASTERS.FIRST_NAME, "Elena")
         .set(MASTERS.LAST_NAME, "Petrova")
         .set(MASTERS.SPECIALIZATION, "Top Colorist")
-        .set(MASTERS.IS_ACTIVE, true)
         .execute();
 
+    // FIX: Публикуем официальную рабочую смену мастера на этот день (с 10:00 до 20:00)
+    // [10:00]─────────────────────[14:00 Запись 15:00]─────────────────────[20:00]
+    dslCtx.insertInto(MASTER_SHIFTS)
+        .set(MASTER_SHIFTS.MASTER_ID, masterId)
+        .set(MASTER_SHIFTS.SHIFT_START, LocalDateTime.parse("2026-08-10T10:00:00"))
+        .set(MASTER_SHIFTS.SHIFT_END, LocalDateTime.parse("2026-08-10T20:00:00"))
+        .execute();
+
+    // Act: Запускаем двухэтапную доменную бронь
     Optional<Appointment> appointmentOpt = bookingService.tryAiBooking(clientId, masterId, slotTime, 60);
 
-    assertTrue(appointmentOpt.isPresent());
+    assertTrue(appointmentOpt.isPresent(), "Запись должна быть создана, так как время попадает в рабочую смену и свободно.");
     assertEquals(AppointmentStatus.AI_PENDING, appointmentOpt.get().status());
   }
 
@@ -219,11 +250,12 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldReturnEmptyOptionalWhenAiBookingClashesWithExistingAppointment() {
+    // Arrange
     long clientA = 100L;
     long clientB = 200L;
     long masterId = 1L;
-    LocalDateTime existingSlot = LocalDateTime.parse("2026-08-10T14:00:00");
-    LocalDateTime clashingSlot = LocalDateTime.parse("2026-08-10T14:30:00");
+    LocalDateTime existingSlot = LocalDateTime.parse("2026-08-10T14:00:00"); // 14:00 - 15:00
+    LocalDateTime clashingSlot = LocalDateTime.parse("2026-08-10T14:30:00"); // 14:30 - 15:30 (Накладка!)
 
     dslCtx.insertInto(CLIENTS)
         .set(CLIENTS.ID, clientA)
@@ -244,9 +276,16 @@ public class BookingServiceImplTest {
         .set(MASTERS.FIRST_NAME, "Elena")
         .set(MASTERS.LAST_NAME, "Petrova")
         .set(MASTERS.SPECIALIZATION, "Top Colorist")
-        .set(MASTERS.IS_ACTIVE, true)
         .execute();
 
+    // FIX: Публикуем официальную рабочую смену мастера на этот день (с 10:00 до 20:00)
+    dslCtx.insertInto(MASTER_SHIFTS)
+        .set(MASTER_SHIFTS.MASTER_ID, masterId)
+        .set(MASTER_SHIFTS.SHIFT_START, LocalDateTime.parse("2026-08-10T10:00:00"))
+        .set(MASTER_SHIFTS.SHIFT_END, LocalDateTime.parse("2026-08-10T20:00:00"))
+        .execute();
+
+    // Создаем жесткую существующую бронь для Клиента А в расписании
     dslCtx.insertInto(APPOINTMENTS)
         .set(APPOINTMENTS.CLIENT_ID, clientA)
         .set(APPOINTMENTS.MASTER_ID, masterId)
@@ -255,8 +294,11 @@ public class BookingServiceImplTest {
         .set(APPOINTMENTS.STATUS, "CONFIRMED")
         .execute();
 
+    // Act: Пытаемся поверх записать Клиента Б на пересекающийся интервал времени
     Optional<Appointment> result = bookingService.tryAiBooking(clientB, masterId, clashingSlot, 60);
-    assertTrue(result.isEmpty());
+
+    // Assert
+    assertTrue(result.isEmpty(), "Система обязана вернуть Optional.empty(), так как временные интервалы пересекаются.");
   }
 
   /**
@@ -286,7 +328,6 @@ public class BookingServiceImplTest {
         .set(MASTERS.FIRST_NAME, "Elena")
         .set(MASTERS.LAST_NAME, "Petrova")
         .set(MASTERS.SPECIALIZATION, "Top Colorist")
-        .set(MASTERS.IS_ACTIVE, true)
         .execute();
 
     // Создаем предварительный сеанс записи в исходном статусе черновика AI_PENDING

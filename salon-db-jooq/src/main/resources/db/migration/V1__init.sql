@@ -29,7 +29,6 @@ CREATE TABLE MASTERS
     FIRST_NAME     VARCHAR(64)  NOT NULL,
     LAST_NAME      VARCHAR(64)  NOT NULL,
     SPECIALIZATION VARCHAR(128) NOT NULL,              -- Core skill context mapping (e.g., 'Top Colorist')
-    IS_ACTIVE      BOOLEAN      NOT NULL DEFAULT TRUE, -- Active employment status marker
     CREATED_AT     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

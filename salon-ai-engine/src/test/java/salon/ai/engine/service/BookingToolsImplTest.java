@@ -72,10 +72,13 @@ class BookingToolsImplTest {
    */
   @Test
   void shouldFormatStylistsGridWhenMastersAreAvailable() {
-    // Arrange
-    Master master1 = new Master(1L, "Elena", "Petrova", "Top Colorist", true);
-    Master master2 = new Master(2L, "Anna", "Ivanova", "Stylist", true);
-    Mockito.when(bookingServiceMock.getAvailableStylists()).thenReturn(List.of(master1, master2));
+    // Arrange - FIX: Removed the trailing 'isActive' boolean parameter from Master records
+    Master master1 = new Master(1L, "Elena", "Petrova", "Top Colorist");
+    Master master2 = new Master(2L, "Anna", "Ivanova", "Stylist");
+
+    // FIX: Mock the new getActiveMastersForDate dynamic signature instead
+    Mockito.when(bookingServiceMock.getActiveMastersForDate(any(LocalDateTime.class)))
+        .thenReturn(List.of(master1, master2));
 
     // Act
     String result = bookingTools.getAvailableStylists();
@@ -83,8 +86,8 @@ class BookingToolsImplTest {
     // Assert
     String expected = "ID: 1 | Name: Elena Petrova | Specialty: Top Colorist\n" +
         "ID: 2 | Name: Anna Ivanova | Specialty: Stylist";
-    assertEquals(expected, result, "Сетка мастеров должна быть отформатирована в строгий текстовый реестр.");
-    verify(bookingServiceMock).getAvailableStylists();
+    assertEquals(expected, result);
+    verify(bookingServiceMock).getActiveMastersForDate(any(LocalDateTime.class));
   }
 
   /**
@@ -95,15 +98,15 @@ class BookingToolsImplTest {
    */
   @Test
   void shouldReturnFriendlyMessageWhenNoStylistsExist() {
-    // Arrange
-    Mockito.when(bookingServiceMock.getAvailableStylists()).thenReturn(Collections.emptyList());
+    // Arrange - FIX: Mock the new getActiveMastersForDate dynamic signature
+    Mockito.when(bookingServiceMock.getActiveMastersForDate(any(LocalDateTime.class)))
+        .thenReturn(Collections.emptyList());
 
     // Act
     String result = bookingTools.getAvailableStylists();
 
     // Assert
-    assertEquals("Currently, there are no active stylists registered in the salon schedule system.", result,
-        "При пустом списке СУБД инструмент обязан вернуть понятный текстовый маркер отказа.");
+    assertEquals("Currently, there are no active stylists registered in the salon schedule system.", result);
   }
 
   /**

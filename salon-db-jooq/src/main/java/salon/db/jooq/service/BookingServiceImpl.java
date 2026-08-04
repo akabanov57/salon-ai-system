@@ -3,6 +3,7 @@ package salon.db.jooq.service;
 import static salon.db.jooq.generated.Tables.APPOINTMENTS;
 import static salon.db.jooq.generated.Tables.CLIENTS;
 import static salon.db.jooq.generated.Tables.MASTERS;
+import static salon.db.jooq.generated.Tables.MASTER_SHIFTS;
 import static salon.db.jooq.generated.Tables.MESSAGE_TRACES;
 
 import io.avaje.validation.constraints.Valid;
@@ -143,39 +144,28 @@ final class BookingServiceImpl implements BookingService {
   }
 
   @Override
-  public List<Master> getAvailableStylists() {
-    log.debug("Запрос списка активных мастеров");
-    return dslCtx.selectFrom(MASTERS)
-        .where(MASTERS.IS_ACTIVE.eq(true))
-        .fetch()
-        .map(r -> new Master(r.getId(), r.getFirstName(), r.getLastName(), r.getSpecialization(), r.getIsActive()));
-  }
-
-  @Override
   public Optional<Appointment> tryAiBooking(Long clientId, Long masterId, LocalDateTime appointmentTime, int durationMinutes) {
-    log.info("Database Step: Attempting provisional AI booking for master [{}] at [{}]", masterId, appointmentTime);
+    log.info("Database Step: Attempting shift-aware provisional AI booking for master [{}] at [{}]", masterId, appointmentTime);
 
     try {
-      // Открываем транзакционный контекст для полной изоляции и исключения Race Condition
       return dslCtx.transactionResult(configuration -> {
         DSLContext txCtx = configuration.dsl();
-        LocalDateTime endTime = appointmentTime.plusMinutes(durationMinutes);
 
-        // Вычисляем накладки времени с использованием заглавных полей метамодели jOOQ
-        boolean hasClash = txCtx.fetchExists(
-            txCtx.selectFrom(APPOINTMENTS)
-                .where(APPOINTMENTS.MASTER_ID.eq(masterId))
-                .and(APPOINTMENTS.STATUS.ne("CANCELED"))
-                .and(APPOINTMENTS.APPOINTMENT_TIME.lt(endTime))
-                .and(APPOINTMENTS.APPOINTMENT_TIME.add(APPOINTMENTS.DURATION_MINUTES.multiply(1)).gt(appointmentTime))
-        );
+        // SUCCESS: Natively reuses our hidden internal private transactional helper!
+        boolean isAvailable = isMasterAvailableAtInternal(txCtx, masterId, appointmentTime, durationMinutes);
 
-        if (hasClash) {
-          log.warn("Database Step: Conflict discovered. Slot at [{}] for master [{}] is occupied.", appointmentTime, masterId);
+        if (!isAvailable) {
+          log.warn("Database Step: Rejection. Master [{}] is either not on shift or fully booked at [{}].", masterId, appointmentTime);
           return Optional.empty();
         }
 
-        // Создаем предварительную бронь в статусе черновика AI_PENDING
+        // =====================================================================
+        // STEP 3: ATOMIC PROVISIONAL RESERVATION
+        // =====================================================================
+        // Completed Shift Timeline Frame Layout:
+        // [SHIFT_START]─────────────────────────────────────────────────────────────[SHIFT_END]
+        //               └───[Existing App]───┘               └───[New AI Reserved]───┘
+        //
         var record = txCtx.insertInto(APPOINTMENTS)
             .set(APPOINTMENTS.CLIENT_ID, clientId)
             .set(APPOINTMENTS.MASTER_ID, masterId)
@@ -193,8 +183,8 @@ final class BookingServiceImpl implements BookingService {
             record.getMasterId(),
             record.getAppointmentTime(),
             record.getDurationMinutes(),
-            AppointmentStatus.valueOf(record.getStatus()), // FIX: jOOQ уже возвращает чистый AppointmentStatus!
-            null,               // serviceNotes (пока оставляем null на этом этапе визита)
+            salon.api.model.AppointmentStatus.valueOf(record.getStatus()),
+            null,
             record.getCreatedAt()
         ));
       });
@@ -210,5 +200,90 @@ final class BookingServiceImpl implements BookingService {
         .set(APPOINTMENTS.STATUS, AppointmentStatus.APPROVED.name())
         .where(APPOINTMENTS.ID.eq(appointmentId))
         .execute());
+  }
+
+  /**
+   * Извлекает список мастеров, у которых есть хотя бы одна опубликованная смена на выбранную дату.
+   */
+  @Override
+  public List<Master> getActiveMastersForDate(LocalDateTime date) {
+    log.info("Database Step: Querying active masters working on date: [{}]", date);
+
+    LocalDateTime startOfDay = date.toLocalDate().atStartOfDay();
+    LocalDateTime endOfDay = date.toLocalDate().atTime(23, 59, 59);
+
+    try {
+      return dslCtx.selectDistinct(MASTERS.ID, MASTERS.FIRST_NAME, MASTERS.LAST_NAME, MASTERS.SPECIALIZATION)
+          .from(MASTERS)
+          .join(MASTER_SHIFTS)
+          .on(MASTER_SHIFTS.MASTER_ID.eq(MASTERS.ID))
+          .where(MASTER_SHIFTS.SHIFT_START.between(startOfDay, endOfDay))
+          .fetch()
+          .map(r -> new Master(
+              r.get(MASTERS.ID),
+              r.get(MASTERS.FIRST_NAME),
+              r.get(MASTERS.LAST_NAME),
+              r.get(MASTERS.SPECIALIZATION)
+          ));
+    } catch (Exception ex) {
+      throw translateException("Failed to query working master profiles for targeted calendar date", ex);
+    }
+  }
+
+  /**
+   * ПРИВАТНЫЙ ХЕЛПЕР СЛОЯ ПЕРСИСТЕНТНОСТИ: Выполняет проверку внутри заданной транзакции.
+   * Полностью инкапсулирует детали jOOQ (DSLContext) внутри модуля БД.
+   */
+  private boolean isMasterAvailableAtInternal(DSLContext txCtx, Long masterId, LocalDateTime time, int durationMinutes) {
+    log.debug("Business Step: Computing isolated availability check for master [{}] at [{}]", masterId, time);
+    LocalDateTime endTime = time.plusMinutes(durationMinutes);
+
+    // =====================================================================
+    // STEP 1: WORK SHIFT CORRIDOR VALIDATION (Inside Transacted Context)
+    // =====================================================================
+    // Master Shift:   [SHIFT_START]───────────────────────────────[SHIFT_END]
+    // Appointment:              [time]─────────────────[endTime]             ==> ALLOWED (True)
+    //
+    // Master Shift:               [SHIFT_START]───────────[SHIFT_END]
+    // Appointment:   [time]──────────────────────────────────────[endTime]    ==> REJECTED (False)
+    //
+    boolean hasShift = txCtx.fetchExists(
+        txCtx.selectFrom(MASTER_SHIFTS)
+            .where(MASTER_SHIFTS.MASTER_ID.eq(masterId))
+            .and(MASTER_SHIFTS.SHIFT_START.le(time))
+            .and(MASTER_SHIFTS.SHIFT_END.ge(endTime))
+    );
+
+    if (!hasShift) {
+      return false;
+    }
+
+    // =====================================================================
+    // STEP 2: OVERLAP CONFLICT CHECK (Inside Transacted Context)
+    // =====================================================================
+    // Requested Slot:           [time]─────────────────────────────────[endTime]
+    // Clash Case A:   [Existing Start]─────────────[Existing End]                    ==> Overlaps start
+    // Clash Case B:                                [Existing Start]──────────[Existing End] ==> Overlaps end
+    // Clash Case C:         [Existing Start]──────────────────────[Existing End]     ==> Swallows completely
+    // Clash Case D:               [Existing Start]───────[Existing End]              ==> Sits inside completely
+    //
+    boolean hasClash = txCtx.fetchExists(
+        txCtx.selectFrom(APPOINTMENTS)
+            .where(APPOINTMENTS.MASTER_ID.eq(masterId))
+            .and(APPOINTMENTS.STATUS.ne("CANCELED"))
+            .and(APPOINTMENTS.APPOINTMENT_TIME.lt(endTime))
+            .and(APPOINTMENTS.APPOINTMENT_TIME.add(APPOINTMENTS.DURATION_MINUTES.multiply(1)).gt(time))
+    );
+
+    return !hasClash;
+  }
+
+  /**
+   * Публичный интерфейсный метод для внешних модулей (ИИ, Веб).
+   * Использует основной dsl-контекст подключения.
+   */
+  @Override
+  public boolean isMasterAvailableAt(Long masterId, LocalDateTime time, int durationMinutes) {
+    return isMasterAvailableAtInternal(this.dslCtx, masterId, time, durationMinutes);
   }
 }
