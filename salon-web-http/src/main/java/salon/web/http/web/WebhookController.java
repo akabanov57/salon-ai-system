@@ -5,6 +5,7 @@ import io.avaje.http.api.Controller;
 import io.avaje.http.api.Path;
 import io.avaje.http.api.Post;
 import io.avaje.inject.External;
+import io.avaje.jex.http.Context;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,9 +13,9 @@ import org.slf4j.MDC;
 import salon.api.exception.AiEngineException;
 import salon.api.exception.IntegrityViolationException;
 import salon.api.exception.StorageInfrastructureException;
-import salon.api.model.IncomingMessageDto;
 import salon.api.model.PlatformType;
 import salon.api.model.ProcessMessageCommand;
+import salon.api.model.TelegramUpdateDto;
 import salon.api.service.AiAssistantService;
 import salon.api.service.BookingService;
 import salon.api.service.MessageTraceService;
@@ -137,21 +138,25 @@ public class WebhookController {
    * @see MessageTraceService
    * @see NotificationService
    */
-  @Post("/message")
-  public void handleIncomingMessage(@Body IncomingMessageDto payload) {
-    log.info("Network Boundary: Intercepted inbound HTTP webhook for platform ID: {}",
-        payload.platformId());
+  @Post("/telegram")
+  public void handleIncomingMessage(@Body TelegramUpdateDto payload, Context ctx) {
+    final String rawPlatformId = String.valueOf(payload.message().chat().id());
+    final String rawDisplayName = payload.message().from().firstName();
+    final String rawText = payload.message().text();
+    final PlatformType platformType = PlatformType.TELEGRAM;
+
+    log.info("Network Boundary: Intercepted inbound genuine Telegram webhook for platform ID: {}", rawPlatformId);
 
     final String currentTraceId = MDC.get("traceId");
-    final PlatformType platformType = PlatformType.valueOf(payload.platformType().toUpperCase());
-    final String rawInboundJson = io.avaje.jsonb.Jsonb.builder().build().toJson(payload);
+
+    final String rawInboundJson = ctx.body();
 
     String finalOutboundText;
     boolean inboundAlreadyArchived = false;
 
     // FIX: Construct the command object outside the try block so it is visible to all catch blocks!
     final ProcessMessageCommand domainCommand = new ProcessMessageCommand(
-        currentTraceId, platformType, payload.platformId(), payload.firstName(), payload.text()
+        currentTraceId, platformType, rawPlatformId, rawDisplayName, rawText
     );
 
     try {
@@ -208,17 +213,17 @@ public class WebhookController {
     // FINAL DISPATCH & AUDIT ROUTING (ALWAYS EXECUTES)
     // =====================================================================
     try {
-      notificationService.sendResponse(payload.platformId(), finalOutboundText);
+      notificationService.sendResponse(rawPlatformId, finalOutboundText);
 
       if (!inboundAlreadyArchived) {
         messageTraceService.logTrace(
-            currentTraceId, platformType, payload.platformId(),
-            MessageTraceService.Direction.INBOUND, rawInboundJson, payload.text()
+            currentTraceId, platformType, rawPlatformId,
+            MessageTraceService.Direction.INBOUND, rawInboundJson, rawText // Сохраняем истинный сырой JSON из буфера Jex!
         );
       }
 
       messageTraceService.logTrace(
-          currentTraceId, platformType, payload.platformId(),
+          currentTraceId, platformType, rawPlatformId,
           MessageTraceService.Direction.OUTBOUND, null, finalOutboundText
       );
 
