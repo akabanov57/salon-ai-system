@@ -189,7 +189,7 @@ public class WebhookController {
             + "сейчас, пожалуйста, свяжитесь с администратором салона по телефону.";
       }
 
-    } catch (StorageInfrastructureException dbDownEx) {
+    } catch (StorageInfrastructureException dbDownEx) { // Удалять нельзя!!!
       // The actual database server is completely offline or compromised
       log.error("Network Boundary: Critical Storage Infrastructure Fault [Trace: {}].",
           currentTraceId, dbDownEx);

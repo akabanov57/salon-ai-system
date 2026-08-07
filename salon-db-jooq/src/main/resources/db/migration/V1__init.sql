@@ -101,3 +101,19 @@ CREATE TABLE MESSAGE_TRACES
 );
 
 CREATE INDEX IDX_MSG_TRACES_TRACE_ID ON MESSAGE_TRACES (TRACE_ID);
+
+-- =====================================================================
+-- 6. ТАБЛИЦА ИДЕМПОТЕНТНОСТИ ВХОДЯЩИХ СОБЫТИЙ (СЦЕНАРИЙ 1)
+-- Смотри USE_CASES_RU.md Сценарий 1.
+-- =====================================================================
+CREATE TABLE INBOUND_EVENTS
+(
+    PLATFORM_TYPE         VARCHAR(32)  NOT NULL, -- 'TELEGRAM', 'INSTAGRAM'
+    MESSENGER_MESSAGE_ID  VARCHAR(128) NOT NULL, -- Натуральный ID сообщения от платформы
+    CREATED_AT            TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- Естественный составной первичный ключ обеспечивает максимальную скорость проверки
+    CONSTRAINT PK_INBOUND_EVENTS PRIMARY KEY (PLATFORM_TYPE, MESSENGER_MESSAGE_ID)
+);
+
+CREATE INDEX IDX_INBOUND_EVENTS_LOOKUP ON INBOUND_EVENTS (PLATFORM_TYPE, MESSENGER_MESSAGE_ID);

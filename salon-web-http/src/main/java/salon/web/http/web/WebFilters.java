@@ -1,14 +1,22 @@
 package salon.web.http.web;
 
 import io.avaje.http.api.Controller;
+import io.avaje.http.api.ExceptionHandler;
 import io.avaje.http.api.Filter;
 import io.avaje.inject.External;
 import io.avaje.jex.http.Context;
 import io.avaje.jex.http.HttpFilter.FilterChain;
+import io.avaje.jex.http.HttpStatus;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import salon.api.exception.IntegrityViolationException;
+import salon.api.exception.StorageInfrastructureException;
+import salon.api.model.PlatformType;
+import salon.api.model.TelegramUpdateDto;
+import salon.api.service.IdempotencyService;
+import salon.api.service.NotificationService;
 import salon.web.http.internal.services.TelegramVerificationService;
 
 /**
@@ -24,10 +32,20 @@ import salon.web.http.internal.services.TelegramVerificationService;
 final class WebFilters {
   private static final Logger log = LoggerFactory.getLogger(WebFilters.class);
 
-  private final TelegramVerificationService telegramService;
+  // Унифицированный эндпоинт для точного матчинга на границе сети
+  private static final String TELEGRAM_WEBHOOK_PATH = "/api/v1/webhooks/telegram";
 
-  WebFilters(@External TelegramVerificationService telegramService) {
+  private final TelegramVerificationService telegramService;
+  private final IdempotencyService idempotencyService;
+  private final NotificationService notificationService;
+
+  WebFilters(
+      @External TelegramVerificationService telegramService,
+      @External IdempotencyService idempotencyService,
+      @External NotificationService notificationService) {
     this.telegramService = telegramService;
+    this.idempotencyService = idempotencyService;
+    this.notificationService = notificationService;
   }
 
   /**
@@ -73,7 +91,7 @@ final class WebFilters {
    */
   @Filter
   void telegramSecurityGuard(FilterChain chain, Context ctx) {
-    if ("POST".equalsIgnoreCase(ctx.method()) && "/api/v1/webhooks/message".equals(ctx.path())) {
+    if ("POST".equalsIgnoreCase(ctx.method()) && TELEGRAM_WEBHOOK_PATH.equals(ctx.path())) {
       String telegramHeaderToken = ctx.header("X-Telegram-Bot-Api-Secret-Token");
 
       boolean isAuthorized = telegramService.isValidTelegramRequest(telegramHeaderToken);
@@ -87,4 +105,69 @@ final class WebFilters {
     chain.proceed();
   }
 
+  /**
+   * ФИЛЬТР 3: Защитный замок идемпотентности (Сценарий 1)
+   */
+  @Filter
+  void idempotencyGuard(FilterChain chain, Context ctx) {
+    if ("POST".equalsIgnoreCase(ctx.method()) && TELEGRAM_WEBHOOK_PATH.equals(ctx.path())) {
+      // 1. Быстро мапим честное зеркало Telegram API для извлечения координат
+      TelegramUpdateDto payload = ctx.bodyAsClass(TelegramUpdateDto.class);
+      String messengerMessageId = String.valueOf(payload.updateId());
+
+      try {
+        // 2. Атомарно пытаемся захватить составной PK в базе данных через интерфейс API
+        idempotencyService.tryAcquireLock(PlatformType.TELEGRAM, messengerMessageId);
+
+      } catch (IntegrityViolationException integrityEx) {
+        // СИТУАЦИЯ А: Обнаружен легитимный сетевой дубликат (Сценарий 1)
+        log.warn("Сетевой фильтр: Обнаружен повторный пакет Telegram [ID: {}]. Глушение запроса (200 OK).",
+            messengerMessageId);
+
+        throw integrityEx;
+
+      }
+      // StorageInfrastructureException автоматически вылетит наверх
+      // в свой собственный @ExceptionHandler без нашего участия!
+    }
+
+    // Если пакет уникален и СУБД стабильна — передаем выполнение в WebhookController
+    chain.proceed();
+  }
+
+  @ExceptionHandler(IntegrityViolationException.class)
+  void idempotencyException(Context ctx) {
+    ctx.status(HttpStatus.OK_200);
+  }
+
+  /**
+   * <h3>Глобальный обработчик критических аварий СУБД на границе сети</h3>
+   *
+   * <p>Перехватывает падение базы данных, отправляет клиенту вежливый аварийный ответ
+   * и возвращает статус 503 мессенджеру для отложенного авто-повтора.</p>
+   */
+  @ExceptionHandler(StorageInfrastructureException.class)
+  void storageInfrastructureException(StorageInfrastructureException ex, Context ctx) {
+    final String currentTraceId = MDC.get("traceId");
+    log.error("Сетевой контур: Перехвачена критическая авария хранилища данных [Trace: {}]. Формируется экстренный UX.",
+        currentTraceId, ex);
+
+    try {
+      // Быстро вытаскиваем координаты клиента из закэшированного Jex-контекста
+      final TelegramUpdateDto payload = ctx.bodyAsClass(TelegramUpdateDto.class);
+      final String rawPlatformId = String.valueOf(payload.message().chat().id());
+
+      // Отправляем вежливое сообщение в обход упавшего бэкенда персистентности
+      notificationService.sendResponse(rawPlatformId,
+          "Извините, в нашей системе записи произошел технический сбой. Пожалуйста, повторите попытку через пару минут.");
+
+    } catch (Exception deliveryEx) {
+      log.error("Сетевой контур: Не удалось доставить экстренное сообщение пользователю [Trace: {}]",
+          currentTraceId, deliveryEx);
+    }
+
+    // Возвращаем мессенджеру 503 Service Unavailable для принудительного Retry полиси
+    ctx.status(HttpStatus.SERVICE_UNAVAILABLE_503)
+        .text("Service Unavailable: Central integrity database engine is offline.");
+  }
 }
