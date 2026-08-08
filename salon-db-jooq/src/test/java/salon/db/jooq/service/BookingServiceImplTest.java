@@ -291,7 +291,7 @@ public class BookingServiceImplTest {
         .set(APPOINTMENTS.MASTER_ID, masterId)
         .set(APPOINTMENTS.APPOINTMENT_TIME, existingSlot)
         .set(APPOINTMENTS.DURATION_MINUTES, 60)
-        .set(APPOINTMENTS.STATUS, "CONFIRMED")
+        .set(APPOINTMENTS.STATUS, AppointmentStatus.APPROVED)
         .execute();
 
     // Act: Пытаемся поверх записать Клиента Б на пересекающийся интервал времени
@@ -337,7 +337,7 @@ public class BookingServiceImplTest {
         .set(APPOINTMENTS.MASTER_ID, masterId)
         .set(APPOINTMENTS.APPOINTMENT_TIME, slotTime)
         .set(APPOINTMENTS.DURATION_MINUTES, 60)
-        .set(APPOINTMENTS.STATUS, "AI_PENDING")
+        .set(APPOINTMENTS.STATUS, AppointmentStatus.AI_PENDING)
         .execute();
 
     // Act: Выполняем доменный метод аппрува по первичному ключу тикета
@@ -348,6 +348,6 @@ public class BookingServiceImplTest {
 
     assertTrue(record.isPresent(), "Запись сеанса должна остаться в таблице расписания.");
     // Проверяем строгое соответствие вашему внутреннему статус-инварианту APPROVED
-    assertEquals("APPROVED", record.get().getStatus(), "После аппрува владельцем статус обязан стать APPROVED.");
+    assertEquals(AppointmentStatus.APPROVED, record.get().getStatus(), "После аппрува владельцем статус обязан стать APPROVED.");
   }
 }

@@ -58,6 +58,17 @@ jooq {
                         value = "semantic"
                     }
                 }
+                forcedTypes {
+                    forcedType {
+                        // Указываем полное имя вашего Java-enum из модуля salon-api
+                        userType = "salon.api.model.AppointmentStatus"
+                        // Указываем стандартный конвертер jOOQ для строк
+                        converter = "org.jooq.impl.EnumConverter"
+                        // Применяем это правило строго к полю STATUS таблицы APPOINTMENTS
+                        includeExpression = "APPOINTMENTS\\.STATUS"
+                    }
+                }
+
             }
             target {
                 // Куда складывать сгенерированные Java-классы таблиц

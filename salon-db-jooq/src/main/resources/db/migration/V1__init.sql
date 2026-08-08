@@ -70,6 +70,10 @@ CREATE TABLE APPOINTMENTS
     STATUS           VARCHAR(32) NOT NULL, -- 'AI_PENDING', 'APPROVED', 'CANCELED'
     CREATED_AT       TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
+-- Железный заслон от невалидных строк на уровне движка хранения данных
+    CONSTRAINT CHK_APPOINTMENT_STATUS_ENUM_COMPLIANCE
+        CHECK (STATUS IN ('AI_PENDING', 'APPROVED', 'CANCELED', 'COMPLETED')),
+
     -- Semantic Foreign Keys: Links a messaging client account with a salon stylist record.
     -- Blocks a master removal if they have active appointments scheduled (RESTRICT).
     CONSTRAINT FK_APPOINTMENT_BELONGS_TO_CONVERSATIONAL_CLIENT FOREIGN KEY (CLIENT_ID)

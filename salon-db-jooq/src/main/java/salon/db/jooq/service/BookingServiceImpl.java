@@ -1,5 +1,7 @@
 package salon.db.jooq.service;
 
+import static org.jooq.DatePart.MINUTE;
+import static org.jooq.impl.DSL.localDateTimeAdd;
 import static salon.db.jooq.generated.Tables.APPOINTMENTS;
 import static salon.db.jooq.generated.Tables.CLIENTS;
 import static salon.db.jooq.generated.Tables.MASTERS;
@@ -171,7 +173,7 @@ final class BookingServiceImpl implements BookingService {
             .set(APPOINTMENTS.MASTER_ID, masterId)
             .set(APPOINTMENTS.APPOINTMENT_TIME, appointmentTime)
             .set(APPOINTMENTS.DURATION_MINUTES, durationMinutes)
-            .set(APPOINTMENTS.STATUS, "AI_PENDING")
+            .set(APPOINTMENTS.STATUS, AppointmentStatus.AI_PENDING)
             .returning()
             .fetchOne();
 
@@ -183,7 +185,7 @@ final class BookingServiceImpl implements BookingService {
             record.getMasterId(),
             record.getAppointmentTime(),
             record.getDurationMinutes(),
-            salon.api.model.AppointmentStatus.valueOf(record.getStatus()),
+            record.getStatus(),
             null,
             record.getCreatedAt()
         ));
@@ -197,7 +199,7 @@ final class BookingServiceImpl implements BookingService {
   public void approveAppointment(Long appointmentId) {
     log.info("Бизнес-шаг: Утверждение записи хозяйкой салона [id: {}]", appointmentId);
     dslCtx.transaction(configuration -> configuration.dsl().update(APPOINTMENTS)
-        .set(APPOINTMENTS.STATUS, AppointmentStatus.APPROVED.name())
+        .set(APPOINTMENTS.STATUS, AppointmentStatus.APPROVED)
         .where(APPOINTMENTS.ID.eq(appointmentId))
         .execute());
   }
@@ -252,6 +254,7 @@ final class BookingServiceImpl implements BookingService {
             .where(MASTER_SHIFTS.MASTER_ID.eq(masterId))
             .and(MASTER_SHIFTS.SHIFT_START.le(time))
             .and(MASTER_SHIFTS.SHIFT_END.ge(endTime))
+            .forUpdate()// ЖЕЛЕЗНЫЙ ЗАМОК: Вторая транзакция встанет в очередь здесь
     );
 
     if (!hasShift) {
@@ -270,9 +273,13 @@ final class BookingServiceImpl implements BookingService {
     boolean hasClash = txCtx.fetchExists(
         txCtx.selectFrom(APPOINTMENTS)
             .where(APPOINTMENTS.MASTER_ID.eq(masterId))
-            .and(APPOINTMENTS.STATUS.ne("CANCELED"))
+            .and(APPOINTMENTS.STATUS.in(AppointmentStatus.AI_PENDING, AppointmentStatus.APPROVED))
             .and(APPOINTMENTS.APPOINTMENT_TIME.lt(endTime))
-            .and(APPOINTMENTS.APPOINTMENT_TIME.add(APPOINTMENTS.DURATION_MINUTES.multiply(1)).gt(time))
+            // FIX: Честное прибавление минут к TIMESTAMP на уровне ядра SQL через DSL.localDateTimeAdd
+            .and(localDateTimeAdd(
+                    APPOINTMENTS.APPOINTMENT_TIME,
+                    APPOINTMENTS.DURATION_MINUTES,
+                    MINUTE).gt(time))
     );
 
     return !hasClash;
