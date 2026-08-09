@@ -56,9 +56,40 @@ CREATE TABLE MASTER_SHIFTS
 -- Compound index optimizing calendar availability queries and scheduling logic sweeps
 CREATE INDEX IDX_MASTER_SHIFTS_RANGE ON MASTER_SHIFTS (MASTER_ID, SHIFT_START, SHIFT_END);
 
+-- =====================================================================
+-- 3.1. ТАБЛИЦА ПЕРЕРЫВОВ ВНУТРИ СМЕНЫ МАСТЕРА
+-- =====================================================================
+CREATE TABLE MASTER_SHIFT_BREAKS
+(
+    ID          BIGSERIAL PRIMARY KEY,
+    SHIFT_ID    BIGINT    NOT NULL, -- Связь с родительской сменой из MASTER_SHIFTS
+    BREAK_START TIMESTAMP NOT NULL, -- Время начала перерыва (например, обед в 13:00)
+    BREAK_END   TIMESTAMP NOT NULL, -- Время окончания перерыва (например, конец обеда в 14:00)
+    CREATED_AT  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- Проверка хронологии: перерыв должен иметь валидные границы
+    CONSTRAINT CHK_BREAK_CHRONOLOGY_MUST_BE_VALID CHECK (BREAK_END > BREAK_START),
+
+    -- Внешний ключ: перерыв жестко привязан к конкретной смене
+    CONSTRAINT FK_BREAK_BELONGS_TO_MASTER_SHIFT FOREIGN KEY (SHIFT_ID)
+        REFERENCES MASTER_SHIFTS (ID) ON DELETE CASCADE
+);
+
+CREATE INDEX IDX_MASTER_SHIFT_BREAKS_LOOKUP ON MASTER_SHIFT_BREAKS (SHIFT_ID, BREAK_START, BREAK_END);
 
 -- =====================================================================
 -- 4. ТАБЛИЦА СЕАНСОВ ЗАПИСЕЙ (РАСПИСАНИЕ ВИЗИТОВ)
+-- =====================================================================
+-- АРХИТЕКТУРНОЕ ОБОСНОВАНИЕ СУРРОГАТНОГО КЛЮЧА (ID):
+-- Использование естественного составного ключа (CLIENT_ID, MASTER_ID, APPOINTMENT_TIME)
+-- намеренно отклонено в пользу суррогатного ID по следующим причинам:
+-- 1. Мутабельность (Переносы визитов): Время сеанса может изменяться администратором через Vaadin UI.
+--    Изменение полей, входящих в Primary Key, ломает индексацию и идентичность сущности в ORM/DataProviders.
+-- 2. Ссылочная целостность (FK): ID служит легковесным неизменяемым якорем для будущих дочерних
+--    таблиц (PAYMENTS, APPOINTMENT_SERVICES, FEEDBACK_LOGS), исключая раздувание составных внешних ключей.
+-- 3. Семантика уникальности: Составной ключ по тройке полей математически не защищает от овербукинга
+--    (параллельная запись разных клиентов к одному мастеру на одно время), что в любом случае требует
+--    двухэтапной интервальной проверки на уровне бизнес-логики (tryAiBooking).
 -- =====================================================================
 CREATE TABLE APPOINTMENTS
 (
@@ -121,3 +152,47 @@ CREATE TABLE INBOUND_EVENTS
 );
 
 CREATE INDEX IDX_INBOUND_EVENTS_LOOKUP ON INBOUND_EVENTS (PLATFORM_TYPE, MESSENGER_MESSAGE_ID);
+
+-- =====================================================================
+-- 7. ИНФРАСТРУКТУРНЫЙ КОНТУР ГРАФИКА РАБОТЫ САЛОНА (ПАРИКМАХЕРСКОЙ)
+-- =====================================================================
+-- АЛГОРИТМ РАЗРЕШЕНИЯ ВРЕМЕНИ РАБОТЫ (FALLBACK / OVERRIDE PATTERN):
+-- При вычислении доступности заведения на конкретную дату (Target Date)
+-- доменный провайдер (SalonScheduleProvider) обязан выполнять двухэтапный поиск:
+--
+-- ШАГ 1 (Приоритет - Календарное исключение):
+--   Система выполняет точечный поиск даты в таблице SALON_CALENDAR_EXCEPTIONS.
+--   Если строка найдена — используются именно эти часы (праздничный, санитарный
+--   или сокращенный день). Это значение имеет высший приоритет и перекрывает шаблон.
+--
+-- ШАГ 2 (Дефолтный вариант - Шаблон дня недели):
+--   Если запись на выбранную дату в таблице исключений отсутствует, система
+--   вычисляет день недели для Target Date (в Java: date.getDayOfWeek().name())
+--   и извлекает стандартный циклический регламент из таблицы SALON_WEEKLY_SCHEDULE.
+-- =====================================================================
+
+-- 7.1. БАЗОВЫЙ ЦИКЛИЧЕСКИЙ ШАБЛОН РАБОТЫ ПО ДНЯМ НЕДЕЛИ
+CREATE TABLE SALON_WEEKLY_SCHEDULE
+(
+    DAY_OF_WEEK   VARCHAR(16) PRIMARY KEY, -- 'MONDAY', 'TUESDAY', ... 'SUNDAY'
+    IS_CLOSED     BOOLEAN     NOT NULL DEFAULT FALSE,
+    OPEN_TIME     TIME        NOT NULL DEFAULT '09:00:00',
+    CLOSE_TIME    TIME        NOT NULL DEFAULT '21:00:00',
+    CREATED_AT    TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- Гарантируем валидность временного интервала на уровне ядра СУБД
+    CONSTRAINT CHK_SALON_WEEKLY_CHRONOLOGY CHECK (IS_CLOSED = TRUE OR CLOSE_TIME > OPEN_TIME)
+);
+
+-- 7.2. ДИНАМИЧЕСКИЕ КАЛЕНДАРНЫЕ ИСКЛЮЧЕНИЯ (ПРАЗДНИКИ, ПЕРЕНОСЫ, МУТАЦИИ ГРАФИКА)
+CREATE TABLE SALON_CALENDAR_EXCEPTIONS
+(
+    CALENDAR_DATE DATE      PRIMARY KEY, -- Например, '2026-12-31'
+    IS_CLOSED     BOOLEAN   NOT NULL DEFAULT FALSE,
+    OPEN_TIME     TIME,
+    CLOSE_TIME    TIME,
+    CREATED_AT    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- Гарантируем валидность временного интервала исключения на уровне ядра СУБД
+    CONSTRAINT CHK_SALON_EXCEPTION_CHRONOLOGY CHECK (IS_CLOSED = TRUE OR CLOSE_TIME > OPEN_TIME)
+);
