@@ -49,24 +49,29 @@ final class BookingToolsImpl implements BookingTools {
         .collect(Collectors.joining("\n"));
   }
 
-  @Tool("Attempts to provisionally book a specific time slot for a client with a selected master. Time format must be ISO local format: YYYY-MM-DDTHH:MM.")
+  @Tool("Attempts to provisionally book a specific time slot for a client with a selected master for a specific service. Time format must be ISO local format: YYYY-MM-DDTHH:MM.")
   @Override
-  public String bookAppointmentSlot(long clientId, long masterId, String dateTimeStr,
-      int durationMinutes) {
-    log.info("AI Tool Invocation: Attempting slot reservation for master {} at {}", masterId, dateTimeStr);
+  public String bookAppointmentSlot(long clientId, long masterId, long serviceId, String dateTimeStr) {
+    // FIX: Using precise SLF4J brace placeholder parameters instead of old syntax tokens
+    log.info(
+        "AI Tool Invocation: Attempting slot reservation for master [{}] and service [{}] at [{}]",
+        masterId, serviceId, dateTimeStr);
+
     try {
       final LocalDateTime time = LocalDateTime.parse(dateTimeStr);
 
-      // ИСПРАВЛЕНО: Чистый функциональный стиль без ручных if-проверок и без .get()/.orElseThrow()
-      return bookingService.tryAiBooking(clientId, masterId, time, durationMinutes)
+      // FIX: Clean functional mapping routed completely via the updated serviceId signature contract
+      return bookingService.tryAiBooking(clientId, masterId, serviceId, time)
           .map(app -> String.format(
               "SUCCESS: Time slot reserved provisionally. Ticket ID: %d. Status is currently %s. The client must await final confirmation from the salon owner.",
               app.id(), app.status()
           ))
-          .orElse("FAILURE: This time slot is already fully booked or clashes with an existing appointment. Please offer alternative slots.");
+          .orElse(
+              "FAILURE: This time slot is already fully booked, clashes with an existing appointment, or conflicts with the stylist's rest break. Please offer alternative slots.");
 
     } catch (Exception e) {
-      log.error("AI Tool Anomaly: Failed to evaluate allocation step. Reason: {}", e.getMessage());
+      log.error("AI Tool Anomaly: Failed to evaluate allocation step for master [{}]. Reason: {}",
+          masterId, e.getMessage(), e);
       return "ERROR: Invalid parameters passed or parsing failure occurred. Verify date string format conforms strictly to ISO local standards.";
     }
   }

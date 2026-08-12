@@ -1,12 +1,13 @@
 package salon.db.jooq.service;
 
-import static org.jooq.DatePart.MINUTE;
 import static org.jooq.impl.DSL.localDateTimeAdd;
 import static salon.db.jooq.generated.Tables.APPOINTMENTS;
 import static salon.db.jooq.generated.Tables.CLIENTS;
 import static salon.db.jooq.generated.Tables.MASTERS;
 import static salon.db.jooq.generated.Tables.MASTER_SHIFTS;
+import static salon.db.jooq.generated.Tables.MASTER_SHIFT_BREAKS;
 import static salon.db.jooq.generated.Tables.MESSAGE_TRACES;
+import static salon.db.jooq.generated.Tables.SERVICES;
 
 import io.avaje.validation.constraints.Valid;
 import jakarta.inject.Inject;
@@ -16,6 +17,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import org.jooq.DSLContext;
+import org.jooq.DatePart;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import salon.api.exception.IntegrityViolationException;
@@ -32,6 +34,9 @@ import salon.api.service.BookingService;
 final class BookingServiceImpl implements BookingService {
 
   private static final Logger log = LoggerFactory.getLogger(BookingServiceImpl.class);
+
+  // FIX: Явно выделяем санитарный зазор между записями клиентов как константу класса
+  private static final int SANITARY_BUFFER_MINUTES = 5;
 
   private final DSLContext dslCtx;
 
@@ -146,47 +151,58 @@ final class BookingServiceImpl implements BookingService {
   }
 
   @Override
-  public Optional<Appointment> tryAiBooking(Long clientId, Long masterId, LocalDateTime appointmentTime, int durationMinutes) {
-    log.info("Database Step: Attempting shift-aware provisional AI booking for master [{}] at [{}]", masterId, appointmentTime);
+  public Optional<Appointment> tryAiBooking(Long clientId, Long masterId, Long serviceId, LocalDateTime appointmentTime) {
+    log.info("Database Step: Attempting shift-and-break aware AI booking for master [{}] at service [{}]", masterId, serviceId);
 
     try {
       return dslCtx.transactionResult(configuration -> {
         DSLContext txCtx = configuration.dsl();
 
-        // SUCCESS: Natively reuses our hidden internal private transactional helper!
-        boolean isAvailable = isMasterAvailableAtInternal(txCtx, masterId, appointmentTime, durationMinutes);
+        // 1. Извлекаем ОДНОВРЕМЕННО длительность и цену услуги из каталога jOOQ метамодели
+        var serviceRecord = txCtx.select(SERVICES.DURATION_MINUTES, SERVICES.PRICE)
+            .from(SERVICES)
+            .where(SERVICES.ID.eq(serviceId))
+            .fetchOne();
 
-        if (!isAvailable) {
-          log.warn("Database Step: Rejection. Master [{}] is either not on shift or fully booked at [{}].", masterId, appointmentTime);
+        if (serviceRecord == null) {
+          log.warn("Database Step: Rejection. Service [{}] does not exist in catalog.", serviceId);
           return Optional.empty();
         }
 
-        // =====================================================================
-        // STEP 3: ATOMIC PROVISIONAL RESERVATION
-        // =====================================================================
-        // Completed Shift Timeline Frame Layout:
-        // [SHIFT_START]─────────────────────────────────────────────────────────────[SHIFT_END]
-        //               └───[Existing App]───┘               └───[New AI Reserved]───┘
-        //
+        int durationMinutes = serviceRecord.get(SERVICES.DURATION_MINUTES);
+        java.math.BigDecimal historicalPrice = serviceRecord.get(SERVICES.PRICE);
+
+        // 2. Трехэтапная проверка доступности (включая константу буфера и перерывы)
+        boolean isAvailable = isMasterAvailableAtInternal(txCtx, masterId, appointmentTime, durationMinutes);
+
+        if (!isAvailable) {
+          log.warn("Database Step: Rejection. Master [{}] is unavailable at [{}].", masterId, appointmentTime);
+          return Optional.empty();
+        }
+
+        // 3. Атомарное сохранение с копированием цены на дату бронирования
         var record = txCtx.insertInto(APPOINTMENTS)
             .set(APPOINTMENTS.CLIENT_ID, clientId)
             .set(APPOINTMENTS.MASTER_ID, masterId)
+            .set(APPOINTMENTS.SERVICE_ID, serviceId)
             .set(APPOINTMENTS.APPOINTMENT_TIME, appointmentTime)
             .set(APPOINTMENTS.DURATION_MINUTES, durationMinutes)
+            .set(APPOINTMENTS.PRICE, historicalPrice) // Фиксируем цену мертвой хваткой на диске
             .set(APPOINTMENTS.STATUS, AppointmentStatus.AI_PENDING)
             .returning()
             .fetchOne();
 
-        Objects.requireNonNull(record, "Database failed to persist the provisional appointment frame.");
+        java.util.Objects.requireNonNull(record, "Database failed to persist the provisional appointment frame.");
 
         return Optional.of(new Appointment(
             record.getId(),
             record.getClientId(),
             record.getMasterId(),
+            record.getServiceId(),
             record.getAppointmentTime(),
             record.getDurationMinutes(),
+            record.getPrice(), // Возвращаем в модель
             record.getStatus(),
-            null,
             record.getCreatedAt()
         ));
       });
@@ -237,52 +253,85 @@ final class BookingServiceImpl implements BookingService {
    * Полностью инкапсулирует детали jOOQ (DSLContext) внутри модуля БД.
    */
   private boolean isMasterAvailableAtInternal(DSLContext txCtx, Long masterId, LocalDateTime time, int durationMinutes) {
-    log.debug("Business Step: Computing isolated availability check for master [{}] at [{}]", masterId, time);
-    LocalDateTime endTime = time.plusMinutes(durationMinutes);
+    log.debug("Business Step: Computing isolated availability check for master [{}] at [{}] with a {}-min buffer",
+        masterId, time, SANITARY_BUFFER_MINUTES);
+
+    // Фактическое время окончания самой процедуры клиента
+    LocalDateTime baseEndTime = time.plusMinutes(durationMinutes);
+    // Время освобождения рабочего места с учетом санитарного перерыва
+    LocalDateTime endTimeWithBuffer = time.plusMinutes(durationMinutes + SANITARY_BUFFER_MINUTES);
 
     // =====================================================================
-    // STEP 1: WORK SHIFT CORRIDOR VALIDATION (Inside Transacted Context)
+    // ЭТАП А: Проверка коридора рабочей смены и пессимистический лок
     // =====================================================================
-    // Master Shift:   [SHIFT_START]───────────────────────────────[SHIFT_END]
-    // Appointment:              [time]─────────────────[endTime]             ==> ALLOWED (True)
+    // Master Shift:   [SHIFT_START]──────────────────────────────────────────────[SHIFT_END]
+    // App Base Time:               [time]──────────────[baseEndTime]                        ==> ALLOWED (True)
+    // App with Buffer:             [time]──────────────[baseEndTime]...[endTimeWithBuffer]  ==> ALLOWED (True)
     //
-    // Master Shift:               [SHIFT_START]───────────[SHIFT_END]
-    // Appointment:   [time]──────────────────────────────────────[endTime]    ==> REJECTED (False)
-    //
-    boolean hasShift = txCtx.fetchExists(
-        txCtx.selectFrom(MASTER_SHIFTS)
-            .where(MASTER_SHIFTS.MASTER_ID.eq(masterId))
-            .and(MASTER_SHIFTS.SHIFT_START.le(time))
-            .and(MASTER_SHIFTS.SHIFT_END.ge(endTime))
-            .forUpdate()// ЖЕЛЕЗНЫЙ ЗАМОК: Вторая транзакция встанет в очередь здесь
-    );
+    // ВАЖНО: Сама процедура (baseEndTime) обязана полностью укладываться в смену.
+    // Санитарный буфер уборки места (endTimeWithBuffer) может легитимно выходить за рамки смены.
+    // =====================================================================
+    var shiftRecord = txCtx.select(MASTER_SHIFTS.ID)
+        .from(MASTER_SHIFTS)
+        .where(MASTER_SHIFTS.MASTER_ID.eq(masterId))
+        .and(MASTER_SHIFTS.SHIFT_START.le(time))
+        .and(MASTER_SHIFTS.SHIFT_END.ge(baseEndTime))
+        .forUpdate()
+        .fetchOne();
 
-    if (!hasShift) {
+    if (shiftRecord == null) {
       return false;
     }
 
+    Long shiftId = shiftRecord.get(MASTER_SHIFTS.ID);
+
     // =====================================================================
-    // STEP 2: OVERLAP CONFLICT CHECK (Inside Transacted Context)
+    // ЭТАП Б: Проверка накладок на существующие визиты с учетом буфера
     // =====================================================================
-    // Requested Slot:           [time]─────────────────────────────────[endTime]
-    // Clash Case A:   [Existing Start]─────────────[Existing End]                    ==> Overlaps start
-    // Clash Case B:                                [Existing Start]──────────[Existing End] ==> Overlaps end
-    // Clash Case C:         [Existing Start]──────────────────────[Existing End]     ==> Swallows completely
-    // Clash Case D:               [Existing Start]───────[Existing End]              ==> Sits inside completely
-    //
+    // Existing App:            [APPOINTMENT_TIME]────────[DURATION_MINUTES]...[+5 min Buffer]
+    // New App Clash A:   [time]─────────────────────────[endTimeWithBuffer]                   ==> CLASH (False)
+    // New App Clash B:                                 [time]────────────────[endTimeWithBuffer] ==> CLASH (False)
+    // New App Clash C:         [time]────────────────────────────────────────[endTimeWithBuffer] ==> CLASH (False)
+    // New App Safe Slot:                                                         [time]───────── ==> ALLOWED (True)
+    // =====================================================================
     boolean hasClash = txCtx.fetchExists(
-        txCtx.selectFrom(APPOINTMENTS)
+        txCtx.selectOne()
+            .from(APPOINTMENTS)
             .where(APPOINTMENTS.MASTER_ID.eq(masterId))
-            .and(APPOINTMENTS.STATUS.in(AppointmentStatus.AI_PENDING, AppointmentStatus.APPROVED))
-            .and(APPOINTMENTS.APPOINTMENT_TIME.lt(endTime))
-            // FIX: Честное прибавление минут к TIMESTAMP на уровне ядра SQL через DSL.localDateTimeAdd
+            .and(APPOINTMENTS.STATUS.in(AppointmentStatus.APPROVED, AppointmentStatus.AI_PENDING))
+            // Условие 1: Существующая запись началась раньше, чем закончится новая (с учетом буфера новой)
+            .and(APPOINTMENTS.APPOINTMENT_TIME.lt(endTimeWithBuffer))
+            // Условие 2: Существующая запись вместе со своим буфером закончится позже, чем начнется новая
             .and(localDateTimeAdd(
-                    APPOINTMENTS.APPOINTMENT_TIME,
-                    APPOINTMENTS.DURATION_MINUTES,
-                    MINUTE).gt(time))
+                APPOINTMENTS.APPOINTMENT_TIME,
+                APPOINTMENTS.DURATION_MINUTES.add(SANITARY_BUFFER_MINUTES), // Внедряем константу в jOOQ выражение
+                DatePart.MINUTE
+            ).gt(time))
     );
 
-    return !hasClash;
+    if (hasClash) {
+      return false; // Слот занят другим клиентом или его технологическим буфером
+    }
+
+    // =====================================================================
+    // ЭТАП В: Проверка накладок на личные/технические перерывы мастера
+    // =====================================================================
+    // Master Break:            [BREAK_START]──────────────────────────[BREAK_END]
+    // New App Clash A:   [time]───────────────[baseEndTime]                                    ==> CLASH (False)
+    // New App Clash B:                                [time]─────────────────[baseEndTime]     ==> CLASH (False)
+    // New App Safe Slot:                                                          [time]────── ==> ALLOWED (True)
+    //
+    // ВАЖНО: Запись клиента не имеет права пересекаться с окнами отдыха мастера.
+    // =====================================================================
+    boolean hitsBreak = txCtx.fetchExists(
+        txCtx.selectOne()
+            .from(MASTER_SHIFT_BREAKS)
+            .where(MASTER_SHIFT_BREAKS.SHIFT_ID.eq(shiftId))
+            .and(MASTER_SHIFT_BREAKS.BREAK_START.lt(baseEndTime))
+            .and(MASTER_SHIFT_BREAKS.BREAK_END.gt(time))
+    );
+
+    return !hitsBreak;
   }
 
   /**

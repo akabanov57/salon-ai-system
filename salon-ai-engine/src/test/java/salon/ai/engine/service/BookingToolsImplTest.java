@@ -3,8 +3,6 @@ package salon.ai.engine.service;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.verify;
 
 import io.avaje.inject.BeanScope;
@@ -110,30 +108,41 @@ class BookingToolsImplTest {
   }
 
   /**
-   * <h3>БИЗНЕС-КОНТЕКСТ: Резервирование свободного слота времени</h3>
-   * <p><b>Сценарий:</b> Выбранное клиентом время полностью свободно в шахматке расписания.</p>
-   * <p><b>Ожидаемое поведение:</b> СУБД создает запись брони в статусе пред-проверки (AI_PENDING),
-   * а инструмент генерирует строку "SUCCESS" с номером билета для отправки клиенту.</p>
+   * <h3>Test AI Tool: Successful execution path for vacant slot allocation</h3>
+   * <p><b>Context:</b> The generative AI engine detects all parameters and triggers the tool.
+   * The tool must safely parse the ISO-8601 string, forward the transaction request with the
+   * extracted service ID, and map the domain response to a client-facing string template [Strict Grounding].</p>
    */
   @Test
   void shouldReturnSuccessStringWhenTimeSlotIsVacant() {
     // Arrange
     long clientId = 10L;
     long masterId = 1L;
+    long serviceId = 55L; // Strict catalog service identifier
     String isoTimeStr = "2026-07-25T15:30";
     LocalDateTime parsedTime = LocalDateTime.parse(isoTimeStr);
 
+    // Instantiate a valid domain model matching the new schema fields (including ServiceId and historical Price)
     Appointment dummyApp = new Appointment(
-        42L, clientId, masterId, parsedTime, 60, AppointmentStatus.AI_PENDING, null, null
+        42L,
+        clientId,
+        masterId,
+        serviceId, // Injected service identifier anchor
+        parsedTime,
+        60, // Normal duration minutes extracted on server-side
+        java.math.BigDecimal.valueOf(2500.00), // Historical audit price
+        AppointmentStatus.AI_PENDING,
+        LocalDateTime.now()
     );
 
-    Mockito.when(bookingServiceMock.tryAiBooking(clientId, masterId, parsedTime, 60))
+    // Mock the updated service signature
+    Mockito.when(bookingServiceMock.tryAiBooking(clientId, masterId, serviceId, parsedTime))
         .thenReturn(Optional.of(dummyApp));
 
-    // Act
-    String result = bookingTools.bookAppointmentSlot(clientId, masterId, isoTimeStr, 60);
+    // Act: Invoke the modified tool method dropping duration parameters entirely
+    String result = bookingTools.bookAppointmentSlot(clientId, masterId, serviceId, isoTimeStr);
 
-    // Assert
+    // Assert: Verify perfect string serialization output expected by the chat runtime loop
     String expected = "SUCCESS: Time slot reserved provisionally. Ticket ID: 42. Status is currently AI_PENDING. " +
         "The client must await final confirmation from the salon owner.";
     assertEquals(expected, result, "При успешном бронировании в БД инструмент обязан выдать строку подтверждения с номером тикета.");
@@ -141,34 +150,50 @@ class BookingToolsImplTest {
 
   /**
    * <h3>БИЗНЕС-КОНТЕКСТ: Занятое время или конфликт расписания</h3>
-   * <p><b>Сценарий:</b> Клиент пытается записаться на время, которое уже занято другим гостем.</p>
+   * <p><b>Сценарий:</b> Клиент пытается записаться на время, которое уже занято другим гостем
+   * либо пересекает окно отдыха/обеда мастера [Strict Grounding].</p>
    * <p><b>Ожидаемое поведение:</b> База отклоняет операцию (возвращает Optional.empty), а инструмент
-   * сообщает нейросети строку "FAILURE", давая команду ИИ-ассистенту предложить клиенту другие свободные слоты.</p>
+   * сообщает нейросети строку "FAILURE", давая команду ИИ-ассистенту предложить клиенту другие свободные слоты [Strict Grounding].</p>
    */
   @Test
   void shouldReturnFailureStringWhenTimeSlotIsOccupied() {
-    // Arrange
-    Mockito.when(bookingServiceMock.tryAiBooking(anyLong(), anyLong(), any(LocalDateTime.class), anyInt()))
+    // Arrange: Mock the updated signature with three Long parameter matchers instead of anyInt()
+    Mockito.when(bookingServiceMock.tryAiBooking(
+            Mockito.anyLong(),
+            Mockito.anyLong(),
+            Mockito.anyLong(), // Matches the new serviceId parameter boundary
+            Mockito.any(LocalDateTime.class)
+        ))
         .thenReturn(Optional.empty());
 
-    // Act
-    String result = bookingTools.bookAppointmentSlot(10L, 1L, "2026-07-25T15:30", 60);
+    // Act: Invoke using the updated method signature (clientId, masterId, serviceId, dateTimeStr)
+    String result = bookingTools.bookAppointmentSlot(10L, 1L, 55L, "2026-07-25T15:30");
 
-    // Assert
-    assertEquals("FAILURE: This time slot is already fully booked or clashes with an existing appointment. Please offer alternative slots.", result,
+    // Assert: Aligned with the exact updated text template defined inside BookingToolsImpl
+    String expected = "FAILURE: This time slot is already fully booked, clashes with an existing appointment, " +
+        "or conflicts with the stylist's rest break. Please offer alternative slots.";
+
+    assertEquals(expected, result,
         "При накладке расписания инструмент обязан выдать инструкцию FAILURE для переориентации ЛЛМ.");
   }
 
   /**
    * <h3>БИЗНЕС-КОНТЕКСТ: Некорректный формат входящих данных от ИИ</h3>
-   * <p><b>Сценарий:</b> Нейросеть ошиблась при разборе текста и передала некорректную строку даты (например, "завтра").</p>
+   * <p><b>Сценарий:</b> Нейросеть ошиблась при разборе текста и передала некорректную строку даты
+   * (например, "завтра") вместо строгого ISO-стандарта [Strict Grounding].</p>
    * <p><b>Ожидаемое поведение:</b> Метод перехватывает ошибку парсинга ISO-строки, предотвращая падение
-   * всего потока выполнения, и возвращает маркер "ERROR" для исправления аргументов ИИ.</p>
+   * всего потока выполнения, и возвращает маркер "ERROR" для исправления аргументов ИИ-модели [Strict Grounding].</p>
    */
   @Test
   void shouldReturnErrorStringWhenDateTimeFormatIsMalformed() {
-    // Act
-    String result = bookingTools.bookAppointmentSlot(10L, 1L, "Broken-Date-String", 60);
+    // Arrange
+    long clientId = 10L;
+    long masterId = 1L;
+    long serviceId = 55L; // Передаем легитимный ID услуги для прохождения компиляции
+    String malformedDate = "Broken-Date-String";
+
+    // Act: Вызываем метод с новой сигнатурой (clientId, masterId, serviceId, dateTimeStr)
+    String result = bookingTools.bookAppointmentSlot(clientId, masterId, serviceId, malformedDate);
 
     // Assert
     assertTrue(result.startsWith("ERROR: Invalid parameters passed or parsing failure occurred."),

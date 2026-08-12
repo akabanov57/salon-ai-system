@@ -11,9 +11,11 @@ import static salon.db.jooq.generated.Tables.MASTER_SHIFTS;
 import static salon.db.jooq.generated.Tables.MASTER_SHIFT_BREAKS;
 import static salon.db.jooq.generated.Tables.SALON_CALENDAR_EXCEPTIONS;
 import static salon.db.jooq.generated.Tables.SALON_WEEKLY_SCHEDULE;
+import static salon.db.jooq.generated.Tables.SERVICES;
 
 import io.avaje.inject.test.InjectTest;
 import jakarta.inject.Inject;
+import java.math.BigDecimal;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -59,6 +61,7 @@ public class ShiftSchedulerServiceIntegrationTest {
     dslCtx.truncate(SALON_WEEKLY_SCHEDULE).execute();
     dslCtx.truncate(MASTERS).execute();
     dslCtx.truncate(CLIENTS).execute();
+    dslCtx.truncate(SERVICES).execute();
     dslCtx.execute("SET REFERENTIAL_INTEGRITY TRUE");
 
     // Establish global infrastructure boundary: Salon operating slot 09:00 - 21:00 on Mondays
@@ -95,15 +98,15 @@ public class ShiftSchedulerServiceIntegrationTest {
   @Test
   void shouldSuccessfullyPublishCleanShiftWhenWithinSalonBounds() {
     // Arrange
-    LocalDateTime start = testDate.atTime(10, 0);
-    LocalDateTime end = testDate.atTime(18, 0);
-    PublishShiftCommand command = new PublishShiftCommand(mockMasterId, start, end, List.of());
+    final LocalDateTime start = testDate.atTime(10, 0);
+    final LocalDateTime end = testDate.atTime(18, 0);
+    final PublishShiftCommand command = new PublishShiftCommand(mockMasterId, start, end, List.of());
 
     // Act
     shiftSchedulerService.publishShifts(List.of(command));
 
     // Assert
-    boolean shiftPersisted = dslCtx.fetchExists(
+    final boolean shiftPersisted = dslCtx.fetchExists(
         dslCtx.selectFrom(MASTER_SHIFTS)
             .where(MASTER_SHIFTS.MASTER_ID.eq(mockMasterId))
             .and(MASTER_SHIFTS.SHIFT_START.eq(start))
@@ -121,27 +124,27 @@ public class ShiftSchedulerServiceIntegrationTest {
   @Test
   void shouldAtomicallyPublishShiftAndPlannedBreaksViaBatchApi() {
     // Arrange
-    LocalDateTime start = testDate.atTime(9, 0);
-    LocalDateTime end = testDate.atTime(21, 0);
-    LocalDateTime breakStart = testDate.atTime(13, 0);
-    LocalDateTime breakEnd = testDate.atTime(14, 0);
+    final LocalDateTime start = testDate.atTime(9, 0);
+    final LocalDateTime end = testDate.atTime(21, 0);
+    final LocalDateTime breakStart = testDate.atTime(13, 0);
+    final LocalDateTime breakEnd = testDate.atTime(14, 0);
 
-    BreakDto plannedBreak = new BreakDto(breakStart, breakEnd);
-    PublishShiftCommand command = new PublishShiftCommand(mockMasterId, start, end, List.of(plannedBreak));
+    final BreakDto plannedBreak = new BreakDto(breakStart, breakEnd);
+    final PublishShiftCommand command = new PublishShiftCommand(mockMasterId, start, end, List.of(plannedBreak));
 
     // Act
     shiftSchedulerService.publishShifts(List.of(command));
 
     // Assert
-    var shiftRow = dslCtx.selectFrom(MASTER_SHIFTS)
+    final var shiftRow = dslCtx.selectFrom(MASTER_SHIFTS)
         .where(MASTER_SHIFTS.MASTER_ID.eq(mockMasterId))
         .fetchOne();
     assertNotNull(shiftRow, "The master shift record should be present.");
 
-    Long generatedShiftId = shiftRow.getId();
+    final Long generatedShiftId = shiftRow.getId();
 
     // Verify jOOQ Batch API successfully pushed downstream breaks to disk
-    boolean breakPersisted = dslCtx.fetchExists(
+    final boolean breakPersisted = dslCtx.fetchExists(
         dslCtx.selectFrom(MASTER_SHIFT_BREAKS)
             .where(MASTER_SHIFT_BREAKS.SHIFT_ID.eq(generatedShiftId))
             .and(MASTER_SHIFT_BREAKS.BREAK_START.eq(breakStart))
@@ -158,30 +161,43 @@ public class ShiftSchedulerServiceIntegrationTest {
    */
   @Test
   void shouldThrowIntegrityViolationExceptionWhenInjectingBreakOntoActiveClientBooking() {
-    // Arrange: 1. Setup a parent shift anchor
-    Long parentShiftId = Objects.requireNonNull(dslCtx.insertInto(MASTER_SHIFTS)
-            .set(MASTER_SHIFTS.MASTER_ID, mockMasterId)
-            .set(MASTER_SHIFTS.SHIFT_START, testDate.atTime(10, 0))
-            .set(MASTER_SHIFTS.SHIFT_END, testDate.atTime(19, 0))
-            .returning(MASTER_SHIFTS.ID)
-            .fetchOne(), "Test setup failure: Generated shift record cannot be null.")
-        .getId();
+    // Arrange: 1. Setup a parent shift anchor safely
+    final var shiftRecord = dslCtx.insertInto(MASTER_SHIFTS)
+        .set(MASTER_SHIFTS.MASTER_ID, mockMasterId)
+        .set(MASTER_SHIFTS.SHIFT_START, testDate.atTime(10, 0))
+        .set(MASTER_SHIFTS.SHIFT_END, testDate.atTime(19, 0))
+        .returning(MASTER_SHIFTS.ID)
+        .fetchOne();
+
+    Objects.requireNonNull(shiftRecord, "Test setup error: Failed to initialize parent master shift row.");
+    final Long parentShiftId = shiftRecord.getId();
+
+    // FIX: 1.1. Создаем обязательный эталон услуги в каталоге SERVICES для соблюдения FK целостности
+    final long testServiceId = 999L;
+    dslCtx.insertInto(SERVICES)
+        .set(SERVICES.ID, testServiceId)
+        .set(SERVICES.NAME, "Техническая проверка")
+        .set(SERVICES.DURATION_MINUTES, 60)
+        .set(SERVICES.PRICE, BigDecimal.valueOf(1000.00))
+        .execute();
 
     // 2. Setup a pre-existing live client booking (14:00 - 15:00) in APPROVED status
     dslCtx.insertInto(APPOINTMENTS)
         .set(APPOINTMENTS.CLIENT_ID, mockClientId)
         .set(APPOINTMENTS.MASTER_ID, mockMasterId)
+        .set(APPOINTMENTS.SERVICE_ID, testServiceId) // FIX: Заполняем обязательный внешний ключ услуги
         .set(APPOINTMENTS.APPOINTMENT_TIME, testDate.atTime(14, 0))
         .set(APPOINTMENTS.DURATION_MINUTES, 60)
-        .set(APPOINTMENTS.STATUS, AppointmentStatus.APPROVED) // Strictly using our domain enum
+        .set(APPOINTMENTS.PRICE, java.math.BigDecimal.valueOf(1000.00)) // FIX: Заполняем обязательную цену визита
+        .set(APPOINTMENTS.STATUS, AppointmentStatus.APPROVED) // Используем доменный enum
         .execute();
 
     // Attempt to inject an overlapping break at 14:30 (Duration: 30 minutes, until 15:00)
-    LocalDateTime conflictingBreakStart = testDate.atTime(14, 30);
-    LocalDateTime conflictingBreakEnd = testDate.atTime(15, 0);
+    final LocalDateTime conflictingBreakStart = testDate.atTime(14, 30);
+    final LocalDateTime conflictingBreakEnd = testDate.atTime(15, 0);
 
-    // Act & Assert: Verify that our strict domain rule forcefully throws and aborts transaction loops
-    IntegrityViolationException exception = assertThrows(IntegrityViolationException.class, () ->
+    // Act & Assert
+    final IntegrityViolationException exception = assertThrows(IntegrityViolationException.class, () ->
         shiftSchedulerService.injectBreakIntoShift(mockMasterId, conflictingBreakStart, conflictingBreakEnd)
     );
 
@@ -189,7 +205,7 @@ public class ShiftSchedulerServiceIntegrationTest {
         "The domain exception must clearly outline the priority conflict message.");
 
     // Verify isolation state: Database row must remain untainted from the break sequence
-    boolean breakLeaked = dslCtx.fetchExists(
+    final boolean breakLeaked = dslCtx.fetchExists(
         dslCtx.selectFrom(MASTER_SHIFT_BREAKS).where(MASTER_SHIFT_BREAKS.SHIFT_ID.eq(parentShiftId))
     );
     assertFalse(breakLeaked, "Variant 3 error: The conflicting break row leaked onto the disk instead of executing a rollback pass.");

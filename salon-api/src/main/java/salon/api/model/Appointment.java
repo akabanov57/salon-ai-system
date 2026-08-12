@@ -9,9 +9,10 @@ public record Appointment(
     Long id,
     @NotNull Long clientId,
     @NotNull Long masterId,
+    @NotNull Long serviceId, // Добавили строгое поле услуги
     @NotNull LocalDateTime appointmentTime,// Заменяет if (appointmentTime == null)
-    @Positive int durationMinutes,// Заменяет if (durationMinutes <= 0)
+    @Positive int durationMinutes, // Копируется из SERVICES на момент записи
+    BigDecimal price, // Копируется из SERVICES на момент записи для финансового аудита
     @NotNull AppointmentStatus status,
-    BigDecimal price,
     LocalDateTime createdAt
 ) {}

@@ -30,14 +30,14 @@ public interface BookingTools {
    * Executes a transactional appointment slot reservation within the core domain schedule matrix.
    * Used by the AI after it successfully collects all mandatory parameters from the chat interaction.
    *
-   * @param clientId      The unique database identifier tracking the verified client profile.
-   * @param masterId      The unique database identifier tracking the selected stylist.
-   * @param dateTimeStr   The target date and time string formatted strictly in ISO-8601 local standard
-   *                      notation (e.g., {@code 2026-07-29T14:00}).
-   * @param durationMinutes The calculated execution allocation window for the requested service.
+   * @param clientId    The unique database identifier tracking the verified client profile.
+   * @param masterId    The unique database identifier tracking the selected stylist.
+   * @param serviceId   The unique database identifier tracking the requested service from the official catalog.
+   * @param dateTimeStr The target date and time string formatted strictly in ISO-8601 local standard
+   *                    notation (e.g., {@code 2026-08-12T14:00}).
    * @return A descriptive text string detailing the reservation outcome (e.g., successful creation
    *         with a ticket tracking ID, or a failure notice if a time conflict occurs) which the AI
    *         will present back to the user.
    */
-  String bookAppointmentSlot(long clientId, long masterId, String dateTimeStr, int durationMinutes);
+  String bookAppointmentSlot(long clientId, long masterId, long serviceId, String dateTimeStr);
 }

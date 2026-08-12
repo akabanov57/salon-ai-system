@@ -20,12 +20,16 @@ public interface BookingService {
   void processMessage(ProcessMessageCommand command);
 
   /**
-   * Пытается забронировать предварительное время (AI_PENDING).
-   * Автоматически проверяет наложение окон (Overlapping) на уровне бизнес-логики.
+   * Предварительное резервирование слота времени ИИ-ассистентом.
+   * Длительность вычисляется на сервере автоматически по идентификатору услуги.
    *
-   * @return Запись, если бронь успешна, или Optional.empty(), если время уже занято.
+   * @param clientId        Идентификатор клиента
+   * @param masterId        Идентификатор мастера
+   * @param serviceId       Идентификатор запрашиваемой услуги из каталога SERVICES
+   * @param appointmentTime Желаемое время начала сеанса
+   * @return Запись черновика визита, если время успешно заблокировано
    */
-  Optional<Appointment> tryAiBooking(Long clientId, Long masterId, LocalDateTime time, int durationMinutes);
+  Optional<Appointment> tryAiBooking(Long clientId, Long masterId, Long serviceId, LocalDateTime appointmentTime);
 
   /**
    * Сценарий для Владельца (Вашей жены): Одобрить запись из Vaadin GUI.

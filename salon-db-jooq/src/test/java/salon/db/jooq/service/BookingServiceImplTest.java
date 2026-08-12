@@ -1,17 +1,23 @@
 package salon.db.jooq.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static salon.db.jooq.generated.Tables.APPOINTMENTS;
 import static salon.db.jooq.generated.Tables.CLIENTS;
 import static salon.db.jooq.generated.Tables.MASTERS;
 import static salon.db.jooq.generated.Tables.MASTER_SHIFTS;
+import static salon.db.jooq.generated.Tables.MASTER_SHIFT_BREAKS;
 import static salon.db.jooq.generated.Tables.MESSAGE_TRACES;
+import static salon.db.jooq.generated.Tables.SERVICES;
 
 import io.avaje.inject.test.InjectTest;
 import jakarta.inject.Inject;
+import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import org.jooq.DSLContext;
 import org.junit.jupiter.api.AfterEach;
@@ -43,6 +49,7 @@ public class BookingServiceImplTest {
     dslCtx.truncate(MASTER_SHIFTS).execute(); // FIX: Added explicit work shifts reset!
     dslCtx.truncate(CLIENTS).execute();
     dslCtx.truncate(MASTERS).execute();
+    dslCtx.truncate(SERVICES).execute();
     dslCtx.execute("SET REFERENTIAL_INTEGRITY TRUE");
   }
 
@@ -202,20 +209,23 @@ public class BookingServiceImplTest {
   }
 
   /**
-   * <h3>Тест 7: Успешное предварительное ИИ-бронирование слота</h3>
-   * <p><b>Бизнес-контекст:</b> ИИ бронирует свободный слот, который полностью попадает
-   * внутрь официально опубликованной рабочей смены мастера.</p>
+   * <h3>Тест 7: Успешное предварительное ИИ-бронирование слота (С учетом услуги и буфера)</h3>
+   *
+   * <p><b>Бизнес-контекст:</b> ИИ бронирует свободный временной слот для клиента.
+   * Длительность и стоимость процедуры автоматически вычисляются сервером на основе объективных
+   * параметров услуги из каталога. Выбранное время полностью укладывается в рабочую смену мастера [Strict Grounding].</p>
    */
   @Test
   void shouldSuccessfullyCreateProvisionBookingWhenSlotIsFree() {
     long clientId = 100L;
     long masterId = 1L;
+    long serviceId = 55L;
     LocalDateTime slotTime = LocalDateTime.parse("2026-08-10T14:00:00");
 
     // 1. Создаем родительский профиль клиента
     dslCtx.insertInto(CLIENTS)
         .set(CLIENTS.ID, clientId)
-        .set(CLIENTS.PLATFORM_TYPE, PlatformType.TELEGRAM.name())
+        .set(CLIENTS.PLATFORM_TYPE, "TELEGRAM")
         .set(CLIENTS.PLATFORM_ID, "123")
         .set(CLIENTS.DISPLAY_NAME, "Natalia")
         .execute();
@@ -228,25 +238,42 @@ public class BookingServiceImplTest {
         .set(MASTERS.SPECIALIZATION, "Top Colorist")
         .execute();
 
-    // FIX: Публикуем официальную рабочую смену мастера на этот день (с 10:00 до 20:00)
-    // [10:00]─────────────────────[14:00 Запись 15:00]─────────────────────[20:00]
+    // 3. Создаем нормативный эталон услуги в каталоге SERVICES
+    dslCtx.insertInto(SERVICES)
+        .set(SERVICES.ID, serviceId)
+        .set(SERVICES.NAME, "Женская стрижка")
+        .set(SERVICES.DURATION_MINUTES, 60) // Объективная длительность: 60 минут
+        .set(SERVICES.PRICE, BigDecimal.valueOf(2500.00)) // Стоимость на дату записи
+        .execute();
+
+    // 4. Публикуем официальную рабочую смену мастера на этот день (с 10:00 до 20:00)
     dslCtx.insertInto(MASTER_SHIFTS)
         .set(MASTER_SHIFTS.MASTER_ID, masterId)
         .set(MASTER_SHIFTS.SHIFT_START, LocalDateTime.parse("2026-08-10T10:00:00"))
         .set(MASTER_SHIFTS.SHIFT_END, LocalDateTime.parse("2026-08-10T20:00:00"))
         .execute();
 
-    // Act: Запускаем двухэтапную доменную бронь
-    Optional<Appointment> appointmentOpt = bookingService.tryAiBooking(clientId, masterId, slotTime, 60);
+    // Act: Запускаем обновленную двухэтапную доменную бронь по serviceId
+    Optional<Appointment> appointmentOpt = bookingService.tryAiBooking(clientId, masterId, serviceId, slotTime);
 
-    assertTrue(appointmentOpt.isPresent(), "Запись должна быть создана, так как время попадает в рабочую смену и свободно.");
-    assertEquals(AppointmentStatus.AI_PENDING, appointmentOpt.get().status());
+    // Assert: Верифицируем успешность и точность копирования характеристик сделки
+    assertTrue(appointmentOpt.isPresent(), "Запись должна быть создана: время попадает в смену мастера и полностью свободно.");
+
+    Appointment appointment = appointmentOpt.get();
+    assertEquals(AppointmentStatus.AI_PENDING, appointment.status(), "Первоначальный статус должен быть AI_PENDING.");
+    assertEquals(60, appointment.durationMinutes(), "Сервер обязан скопировать длительность 60 минут из SERVICES.");
+    // FIX: Сравниваем через compareTo == 0, чтобы игнорировать разницу в масштабе знаков после запятой
+    assertEquals(0, java.math.BigDecimal.valueOf(2500.00).compareTo(appointment.price()),
+        "Сервер обязан намертво зафиксировать цену 2500.00 в талоне записи.");
+    assertEquals(serviceId, appointment.serviceId(), "Внешний ключ услуги должен быть корректно привязан.");
   }
 
   /**
-   * <h3>Тест 8: Конфликт расписания при попытке ИИ-бронирования</h3>
+   * <h3>Тест 8: Конфликт расписания при попытке ИИ-бронирования (С учетом буфера услуг)</h3>
+   *
    * <p><b>Бизнес-контекст:</b> ИИ пытается записать клиента на слот, который пересекается
-   * с уже существующей записью другого человека к этому же мастеру.</p>
+   * с уже существующей записью другого человека к этому же мастеру, либо попадает в зону действия
+   * её 5-минутного санитарного буфера очистки места [Strict Grounding].</p>
    */
   @Test
   void shouldReturnEmptyOptionalWhenAiBookingClashesWithExistingAppointment() {
@@ -254,23 +281,28 @@ public class BookingServiceImplTest {
     long clientA = 100L;
     long clientB = 200L;
     long masterId = 1L;
+    long existingServiceId = 55L; // Услуга первого клиента (60 минут)
+    long newServiceId = 56L;      // Услуга второго клиента
+
     LocalDateTime existingSlot = LocalDateTime.parse("2026-08-10T14:00:00"); // 14:00 - 15:00
     LocalDateTime clashingSlot = LocalDateTime.parse("2026-08-10T14:30:00"); // 14:30 - 15:30 (Накладка!)
 
+    // 1. Создаем профили двух клиентов
     dslCtx.insertInto(CLIENTS)
         .set(CLIENTS.ID, clientA)
-        .set(CLIENTS.PLATFORM_TYPE, PlatformType.TELEGRAM.name())
+        .set(CLIENTS.PLATFORM_TYPE, "TELEGRAM")
         .set(CLIENTS.PLATFORM_ID, "123")
         .set(CLIENTS.DISPLAY_NAME, "Natalia")
         .execute();
 
     dslCtx.insertInto(CLIENTS)
         .set(CLIENTS.ID, clientB)
-        .set(CLIENTS.PLATFORM_TYPE, PlatformType.TELEGRAM.name())
+        .set(CLIENTS.PLATFORM_TYPE, "TELEGRAM")
         .set(CLIENTS.PLATFORM_ID, "456")
         .set(CLIENTS.DISPLAY_NAME, "Anna")
         .execute();
 
+    // 2. Создаем профиль мастера
     dslCtx.insertInto(MASTERS)
         .set(MASTERS.ID, masterId)
         .set(MASTERS.FIRST_NAME, "Elena")
@@ -278,51 +310,76 @@ public class BookingServiceImplTest {
         .set(MASTERS.SPECIALIZATION, "Top Colorist")
         .execute();
 
-    // FIX: Публикуем официальную рабочую смену мастера на этот день (с 10:00 до 20:00)
+    // 3. Создаем две разные записи в справочнике SERVICES
+    dslCtx.insertInto(SERVICES)
+        .set(SERVICES.ID, existingServiceId)
+        .set(SERVICES.NAME, "Сложное окрашивание")
+        .set(SERVICES.DURATION_MINUTES, 60)
+        .set(SERVICES.PRICE, java.math.BigDecimal.valueOf(5000.00))
+        .execute();
+
+    dslCtx.insertInto(SERVICES)
+        .set(SERVICES.ID, newServiceId)
+        .set(SERVICES.NAME, "Укладка волос")
+        .set(SERVICES.DURATION_MINUTES, 30)
+        .set(SERVICES.PRICE, java.math.BigDecimal.valueOf(1500.00))
+        .execute();
+
+    // 4. Публикуем официальную рабочую смену мастера (с 10:00 до 20:00)
     dslCtx.insertInto(MASTER_SHIFTS)
         .set(MASTER_SHIFTS.MASTER_ID, masterId)
         .set(MASTER_SHIFTS.SHIFT_START, LocalDateTime.parse("2026-08-10T10:00:00"))
         .set(MASTER_SHIFTS.SHIFT_END, LocalDateTime.parse("2026-08-10T20:00:00"))
         .execute();
 
-    // Создаем жесткую существующую бронь для Клиента А в расписании
+    // 5. Создаем жесткую существующую бронь для Клиента А в статусе APPROVED с честным копированием параметров
     dslCtx.insertInto(APPOINTMENTS)
         .set(APPOINTMENTS.CLIENT_ID, clientA)
         .set(APPOINTMENTS.MASTER_ID, masterId)
+        .set(APPOINTMENTS.SERVICE_ID, existingServiceId)
         .set(APPOINTMENTS.APPOINTMENT_TIME, existingSlot)
         .set(APPOINTMENTS.DURATION_MINUTES, 60)
-        .set(APPOINTMENTS.STATUS, AppointmentStatus.APPROVED)
+        .set(APPOINTMENTS.PRICE, java.math.BigDecimal.valueOf(5000.00))
+        .set(APPOINTMENTS.STATUS, AppointmentStatus.APPROVED) // Строго APPROVED согласно конечным статусам
         .execute();
 
     // Act: Пытаемся поверх записать Клиента Б на пересекающийся интервал времени
-    Optional<Appointment> result = bookingService.tryAiBooking(clientB, masterId, clashingSlot, 60);
+    Optional<Appointment> result = bookingService.tryAiBooking(clientB, masterId, newServiceId, clashingSlot);
 
-    // Assert
-    assertTrue(result.isEmpty(), "Система обязана вернуть Optional.empty(), так как временные интервалы пересекаются.");
+    // Assert: Верифицируем, что jOOQ-предикат ЭТАПА Б заблокировал овербукинг
+    assertTrue(result.isEmpty(), "Система обязана вернуть Optional.empty(), так как временные интервалы процедур пересекаются.");
   }
 
   /**
-   * <h3>Тест 9: Подтверждение записи владельцем салона (Оркестрация статуса)</h3>
-   * <p><b>Бизнес-контекст:</b> Владелец салона заходит в панель управления, видит бронь AI_PENDING
-   * и одобряет её, переводя в финальный рабочий статус CONFIRMED.</p>
+   * <h3>Тест 9: Конфликт бронирования ИИ с официальным перерывом мастера</h3>
+   *
+   * <p><b>Бизнес-контекст:</b> ИИ-ассистент пытается записать клиента на временной слот,
+   * который пересекается с официально зарегистрированным окном отдыха (обедом) мастера.
+   * Система обязана защитить личное время сотрудника и отклонить бронирование [Strict Grounding].</p>
    */
   @Test
   void shouldTransitionStatusToConfirmedWhenApprovedByOwner() {
     // Arrange
     long clientId = 100L;
     long masterId = 1L;
-    long appointmentId = 999L;
-    LocalDateTime slotTime = LocalDateTime.parse("2026-08-10T14:00:00");
+    long serviceId = 55L; // Услуга длительностью 60 минут
 
-    // Вставляем родительскую запись клиента с использованием новых заглавных колонок СУБД
+    LocalDate date = LocalDate.of(2026, 8, 10);
+    LocalDateTime breakStart = date.atTime(13, 0); // Обед с 13:00
+    LocalDateTime breakEnd = date.atTime(14, 0);   // Обед до 14:00
+
+    // Клиент пытается занять слот 13:30 - 14:30 (Пересекает обед!)
+    LocalDateTime targetBookingTime = date.atTime(13, 30);
+
+    // 1. Создаем родительский профиль клиента
     dslCtx.insertInto(CLIENTS)
         .set(CLIENTS.ID, clientId)
-        .set(CLIENTS.PLATFORM_TYPE, PlatformType.TELEGRAM.name())
+        .set(CLIENTS.PLATFORM_TYPE, "TELEGRAM")
         .set(CLIENTS.PLATFORM_ID, "123")
         .set(CLIENTS.DISPLAY_NAME, "Natalia")
         .execute();
 
-    // Вставляем родительскую запись мастера с соблюдением NOT NULL ограничений
+    // 2. Создаем родительский профиль мастера
     dslCtx.insertInto(MASTERS)
         .set(MASTERS.ID, masterId)
         .set(MASTERS.FIRST_NAME, "Elena")
@@ -330,24 +387,43 @@ public class BookingServiceImplTest {
         .set(MASTERS.SPECIALIZATION, "Top Colorist")
         .execute();
 
-    // Создаем предварительный сеанс записи в исходном статусе черновика AI_PENDING
-    dslCtx.insertInto(APPOINTMENTS)
-        .set(APPOINTMENTS.ID, appointmentId)
-        .set(APPOINTMENTS.CLIENT_ID, clientId)
-        .set(APPOINTMENTS.MASTER_ID, masterId)
-        .set(APPOINTMENTS.APPOINTMENT_TIME, slotTime)
-        .set(APPOINTMENTS.DURATION_MINUTES, 60)
-        .set(APPOINTMENTS.STATUS, AppointmentStatus.AI_PENDING)
+    // 3. Создаем услугу в справочнике SERVICES (60 минут)
+    dslCtx.insertInto(SERVICES)
+        .set(SERVICES.ID, serviceId)
+        .set(SERVICES.NAME, "Стрижка модельная")
+        .set(SERVICES.DURATION_MINUTES, 60)
+        .set(SERVICES.PRICE, java.math.BigDecimal.valueOf(2000.00))
         .execute();
 
-    // Act: Выполняем доменный метод аппрува по первичному ключу тикета
-    bookingService.approveAppointment(appointmentId);
+    // 4. Публикуем родительскую рабочую смену мастера (с 10:00 до 20:00)
+    var shiftRecord = dslCtx.insertInto(MASTER_SHIFTS)
+        .set(MASTER_SHIFTS.MASTER_ID, masterId)
+        .set(MASTER_SHIFTS.SHIFT_START, date.atTime(10, 0))
+        .set(MASTER_SHIFTS.SHIFT_END, date.atTime(20, 0))
+        .returning(MASTER_SHIFTS.ID)
+        .fetchOne();
 
-    // Assert: Напрямую вычитываем строку СУБД для проверки финального рантайм-состояния
-    var record = dslCtx.selectFrom(APPOINTMENTS).where(APPOINTMENTS.ID.eq(appointmentId)).fetchOptional();
+    Objects.requireNonNull(shiftRecord, "Test Setup Failure: Master shift creation returned null.");
+    Long generatedShiftId = shiftRecord.getId();
 
-    assertTrue(record.isPresent(), "Запись сеанса должна остаться в таблице расписания.");
-    // Проверяем строгое соответствие вашему внутреннему статус-инварианту APPROVED
-    assertEquals(AppointmentStatus.APPROVED, record.get().getStatus(), "После аппрува владельцем статус обязан стать APPROVED.");
+    // 5. Внедряем официальный перерыв мастера, привязанный к SHIFT_ID
+    dslCtx.insertInto(MASTER_SHIFT_BREAKS)
+        .set(MASTER_SHIFT_BREAKS.SHIFT_ID, generatedShiftId)
+        .set(MASTER_SHIFT_BREAKS.BREAK_START, breakStart)
+        .set(MASTER_SHIFT_BREAKS.BREAK_END, breakEnd)
+        .execute();
+
+    // Act: ИИ пытается зарезервировать слот на время обеда
+    Optional<Appointment> result = bookingService.tryAiBooking(clientId, masterId, serviceId, targetBookingTime);
+
+    // Assert: Железная верификация изоляции окна отдыха на ЭТАПЕ В
+    assertTrue(result.isEmpty(),
+        "Система обязана вернуть Optional.empty(), так как сеанс клиента накладывается на обеденный перерыв мастера.");
+
+    // Дополнительный аудит: проверяем, что строка в APPOINTMENTS действительно НЕ появилась
+    boolean bookingLeaked = dslCtx.fetchExists(
+        dslCtx.selectFrom(APPOINTMENTS).where(APPOINTMENTS.MASTER_ID.eq(masterId))
+    );
+    assertFalse(bookingLeaked, "Критическая ошибка: запись просочилась в базу данных вопреки перерыву мастера!");
   }
 }

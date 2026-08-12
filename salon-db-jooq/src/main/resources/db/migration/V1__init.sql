@@ -78,6 +78,20 @@ CREATE TABLE MASTER_SHIFT_BREAKS
 CREATE INDEX IDX_MASTER_SHIFT_BREAKS_LOOKUP ON MASTER_SHIFT_BREAKS (SHIFT_ID, BREAK_START, BREAK_END);
 
 -- =====================================================================
+-- 1.1. СПРАВОЧНИК УСЛУГ ПАРИКМАХЕРСКОЙ (КАТАЛОГ)
+-- =====================================================================
+CREATE TABLE SERVICES
+(
+    ID               BIGSERIAL PRIMARY KEY,
+    NAME             VARCHAR(128) NOT NULL,
+    DURATION_MINUTES INT          NOT NULL, -- Объективное нормативное время услуги
+    PRICE            NUMERIC(10,2) NOT NULL,
+    CREATED_AT       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT CHK_SERVICE_DURATION_MUST_BE_POSITIVE CHECK (DURATION_MINUTES > 0)
+);
+
+-- =====================================================================
 -- 4. ТАБЛИЦА СЕАНСОВ ЗАПИСЕЙ (РАСПИСАНИЕ ВИЗИТОВ)
 -- =====================================================================
 -- АРХИТЕКТУРНОЕ ОБОСНОВАНИЕ СУРРОГАТНОГО КЛЮЧА (ID):
@@ -96,8 +110,10 @@ CREATE TABLE APPOINTMENTS
     ID               BIGSERIAL PRIMARY KEY,
     CLIENT_ID        BIGINT      NOT NULL,
     MASTER_ID        BIGINT      NOT NULL,
-    appointment_time TIMESTAMP   NOT NULL,
-    DURATION_MINUTES INT         NOT NULL DEFAULT 60,
+    SERVICE_ID       BIGINT      NOT NULL, -- FIX: Прямая жесткая привязка к каталогу услуг
+    APPOINTMENT_TIME TIMESTAMP   NOT NULL,
+    DURATION_MINUTES INT         NOT NULL, -- Копируется из SERVICES для стабильности исторического аудита
+    PRICE            NUMERIC(10,2) NOT NULL, -- FIX: Фиксация исторической стоимости на дату записи
     STATUS           VARCHAR(32) NOT NULL, -- 'AI_PENDING', 'APPROVED', 'CANCELED'
     CREATED_AT       TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -111,7 +127,9 @@ CREATE TABLE APPOINTMENTS
         REFERENCES CLIENTS (ID) ON DELETE CASCADE,
 
     CONSTRAINT FK_APPOINTMENT_ASSIGNED_TO_SALON_MASTER FOREIGN KEY (MASTER_ID)
-        REFERENCES MASTERS (ID) ON DELETE RESTRICT
+        REFERENCES MASTERS (ID) ON DELETE RESTRICT,
+
+    CONSTRAINT FK_APPOINTMENT_LINKS_TO_SERVICE FOREIGN KEY (SERVICE_ID) REFERENCES SERVICES (ID) ON DELETE RESTRICT
 );
 
 CREATE INDEX IDX_APPOINTMENTS_SCHEDULE ON APPOINTMENTS (MASTER_ID, appointment_time);
