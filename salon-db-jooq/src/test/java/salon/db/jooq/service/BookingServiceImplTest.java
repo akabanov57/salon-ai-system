@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static salon.db.jooq.generated.Tables.APPOINTMENTS;
 import static salon.db.jooq.generated.Tables.CLIENTS;
 import static salon.db.jooq.generated.Tables.MASTERS;
+import static salon.db.jooq.generated.Tables.MASTER_SERVICES;
 import static salon.db.jooq.generated.Tables.MASTER_SHIFTS;
 import static salon.db.jooq.generated.Tables.MASTER_SHIFT_BREAKS;
 import static salon.db.jooq.generated.Tables.MESSAGE_TRACES;
@@ -50,6 +51,7 @@ public class BookingServiceImplTest {
     dslCtx.truncate(CLIENTS).execute();
     dslCtx.truncate(MASTERS).execute();
     dslCtx.truncate(SERVICES).execute();
+    dslCtx.truncate(MASTER_SERVICES).execute();
     dslCtx.execute("SET REFERENTIAL_INTEGRITY TRUE");
   }
 
@@ -209,11 +211,12 @@ public class BookingServiceImplTest {
   }
 
   /**
-   * <h3>Тест 7: Успешное предварительное ИИ-бронирование слота (С учетом услуги и буфера)</h3>
+   * <h3>Тест 7: Успешное предварительное ИИ-бронирование слота (С учетом услуги, компетенции и буфера)</h3>
    *
    * <p><b>Бизнес-контекст:</b> ИИ бронирует свободный временной слот для клиента.
    * Длительность и стоимость процедуры автоматически вычисляются сервером на основе объективных
-   * параметров услуги из каталога. Выбранное время полностью укладывается в рабочую смену мастера [Strict Grounding].</p>
+   * параметров услуги из каталога. Выбранное время полностью укладывается в рабочую смену мастера,
+   * и мастер официально обладает квалификацией для выполнения этой услуги [Strict Grounding].</p>
    */
   @Test
   void shouldSuccessfullyCreateProvisionBookingWhenSlotIsFree() {
@@ -246,6 +249,12 @@ public class BookingServiceImplTest {
         .set(SERVICES.PRICE, BigDecimal.valueOf(2500.00)) // Стоимость на дату записи
         .execute();
 
+    // FIX: 3.1. Устанавливаем допуск мастера к услуге в связующей таблице (ЭТАП 0)
+    dslCtx.insertInto(MASTER_SERVICES)
+        .set(MASTER_SERVICES.MASTER_ID, masterId)
+        .set(MASTER_SERVICES.SERVICE_ID, serviceId)
+        .execute();
+
     // 4. Публикуем официальную рабочую смену мастера на этот день (с 10:00 до 20:00)
     dslCtx.insertInto(MASTER_SHIFTS)
         .set(MASTER_SHIFTS.MASTER_ID, masterId)
@@ -269,11 +278,11 @@ public class BookingServiceImplTest {
   }
 
   /**
-   * <h3>Тест 8: Конфликт расписания при попытке ИИ-бронирования (С учетом буфера услуг)</h3>
+   * <h3>Тест 8: Конфликт расписания при попытке ИИ-бронирования (С учетом компетенций и буфера)</h3>
    *
    * <p><b>Бизнес-контекст:</b> ИИ пытается записать клиента на слот, который пересекается
    * с уже существующей записью другого человека к этому же мастеру, либо попадает в зону действия
-   * её 5-минутного санитарного буфера очистки места [Strict Grounding].</p>
+   * её 5-минутного санитарного буфера очистки места. Мастер обладает квалификацией для обеих услуг [Strict Grounding].</p>
    */
   @Test
   void shouldReturnEmptyOptionalWhenAiBookingClashesWithExistingAppointment() {
@@ -325,6 +334,17 @@ public class BookingServiceImplTest {
         .set(SERVICES.PRICE, java.math.BigDecimal.valueOf(1500.00))
         .execute();
 
+    // FIX: 3.1. Задаем допуски мастера к ОБЕИМ услугам в матрице компетенций (ЭТАП 0)
+    dslCtx.insertInto(MASTER_SERVICES)
+        .set(MASTER_SERVICES.MASTER_ID, masterId)
+        .set(MASTER_SERVICES.SERVICE_ID, existingServiceId)
+        .execute();
+
+    dslCtx.insertInto(MASTER_SERVICES)
+        .set(MASTER_SERVICES.MASTER_ID, masterId)
+        .set(MASTER_SERVICES.SERVICE_ID, newServiceId)
+        .execute();
+
     // 4. Публикуем официальную рабочую смену мастера (с 10:00 до 20:00)
     dslCtx.insertInto(MASTER_SHIFTS)
         .set(MASTER_SHIFTS.MASTER_ID, masterId)
@@ -355,7 +375,7 @@ public class BookingServiceImplTest {
    *
    * <p><b>Бизнес-контекст:</b> ИИ-ассистент пытается записать клиента на временной слот,
    * который пересекается с официально зарегистрированным окном отдыха (обедом) мастера.
-   * Система обязана защитить личное время сотрудника и отклонить бронирование [Strict Grounding].</p>
+   * Мастер имеет допуск к услуге. Система обязана отклонить бронирование [Strict Grounding].</p>
    */
   @Test
   void shouldTransitionStatusToConfirmedWhenApprovedByOwner() {
@@ -395,6 +415,12 @@ public class BookingServiceImplTest {
         .set(SERVICES.PRICE, java.math.BigDecimal.valueOf(2000.00))
         .execute();
 
+    // FIX: 3.1. Устанавливаем допуск мастера к услуге в матрице компетенций (ЭТАП 0)
+    dslCtx.insertInto(MASTER_SERVICES)
+        .set(MASTER_SERVICES.MASTER_ID, masterId)
+        .set(MASTER_SERVICES.SERVICE_ID, serviceId)
+        .execute();
+
     // 4. Публикуем родительскую рабочую смену мастера (с 10:00 до 20:00)
     var shiftRecord = dslCtx.insertInto(MASTER_SHIFTS)
         .set(MASTER_SHIFTS.MASTER_ID, masterId)
@@ -425,5 +451,59 @@ public class BookingServiceImplTest {
         dslCtx.selectFrom(APPOINTMENTS).where(APPOINTMENTS.MASTER_ID.eq(masterId))
     );
     assertFalse(bookingLeaked, "Критическая ошибка: запись просочилась в базу данных вопреки перерыву мастера!");
+  }
+
+  /**
+   * <h3>Тест 10: Отклонение бронирования при отсутствии квалификации мастера (ЭТАП 0)</h3>
+   *
+   * <p><b>Бизнес-контекст:</b> Клиент пытается записаться на услугу (например, Сложное окрашивание).
+   * У выбранного мастера есть свободная смена, но он не обладает квалификацией для этой процедуры [Strict Grounding].</p>
+   */
+  @Test
+  void shouldReturnEmptyOptionalWhenMasterLacksServiceCompetence() {
+    // Arrange
+    long clientId = 100L;
+    long masterId = 1L;
+    long unauthorizedServiceId = 99L; // Услуга, к которой у мастера НЕТ допуска
+    LocalDateTime slotTime = LocalDateTime.parse("2026-08-10T14:00:00");
+
+    // 1. Создаем клиента
+    dslCtx.insertInto(CLIENTS)
+        .set(CLIENTS.ID, clientId)
+        .set(CLIENTS.PLATFORM_TYPE, "TELEGRAM")
+        .set(CLIENTS.PLATFORM_ID, "123")
+        .set(CLIENTS.DISPLAY_NAME, "Natalia")
+        .execute();
+
+    // 2. Создаем мастера
+    dslCtx.insertInto(MASTERS)
+        .set(MASTERS.ID, masterId)
+        .set(MASTERS.FIRST_NAME, "Elena")
+        .set(MASTERS.LAST_NAME, "Petrova")
+        .set(MASTERS.SPECIALIZATION, "Men's Barber Only") // Ограниченная специализация
+        .execute();
+
+    // 3. Создаем услугу в каталоге
+    dslCtx.insertInto(SERVICES)
+        .set(SERVICES.ID, unauthorizedServiceId)
+        .set(SERVICES.NAME, "Сложное женское окрашивание")
+        .set(SERVICES.DURATION_MINUTES, 120)
+        .set(SERVICES.PRICE, java.math.BigDecimal.valueOf(6000.00))
+        .execute();
+
+    // ВАЖНО: Мы НЕ добавляем запись в таблицу MASTER_SERVICES для этой пары!
+
+    // 4. Публикуем смену мастера (он на месте и свободен)
+    dslCtx.insertInto(MASTER_SHIFTS)
+        .set(MASTER_SHIFTS.MASTER_ID, masterId)
+        .set(MASTER_SHIFTS.SHIFT_START, LocalDateTime.parse("2026-08-10T10:00:00"))
+        .set(MASTER_SHIFTS.SHIFT_END, LocalDateTime.parse("2026-08-10T20:00:00"))
+        .execute();
+
+    // Act: Пытаемся совершить бронирование визита
+    Optional<Appointment> result = bookingService.tryAiBooking(clientId, masterId, unauthorizedServiceId, slotTime);
+
+    // Assert: Верифицируем мгновенное отклонение на ЭТАПЕ 0
+    assertTrue(result.isEmpty(), "Система обязана отклонить бронь, так как у мастера нет квалификационного допуска.");
   }
 }

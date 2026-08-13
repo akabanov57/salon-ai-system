@@ -92,6 +92,27 @@ CREATE TABLE SERVICES
 );
 
 -- =====================================================================
+-- 1.2. МАТРИЦА КОМПЕТЕНЦИЙ МАСТЕРОВ (СВЯЗЬ МНОГИЕ-КО-МНОГИМ)
+-- =====================================================================
+CREATE TABLE MASTER_SERVICES
+(
+    MASTER_ID  BIGINT    NOT NULL,
+    SERVICE_ID BIGINT    NOT NULL,
+    CREATED_AT TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- Составной первичный ключ гарантирует уникальность пары
+    PRIMARY KEY (MASTER_ID, SERVICE_ID),
+
+    CONSTRAINT FK_MASTER_COMPETENCE FOREIGN KEY (MASTER_ID)
+        REFERENCES MASTERS (ID) ON DELETE CASCADE,
+
+    CONSTRAINT FK_SERVICE_COMPETENCE FOREIGN KEY (SERVICE_ID)
+        REFERENCES SERVICES (ID) ON DELETE CASCADE
+);
+
+CREATE INDEX IDX_MASTER_SERVICES_LOOKUP ON MASTER_SERVICES (MASTER_ID, SERVICE_ID);
+
+-- =====================================================================
 -- 4. ТАБЛИЦА СЕАНСОВ ЗАПИСЕЙ (РАСПИСАНИЕ ВИЗИТОВ)
 -- =====================================================================
 -- АРХИТЕКТУРНОЕ ОБОСНОВАНИЕ СУРРОГАТНОГО КЛЮЧА (ID):

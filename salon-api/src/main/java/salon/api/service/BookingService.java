@@ -46,5 +46,5 @@ public interface BookingService {
    * <h3>Бизнес-метод: Проверка фактической занятости и доступности мастера</h3>
    * Вычисляет, находится ли мастер на рабочей смене и свободен ли запрашиваемый временной интервал.
    */
-  boolean isMasterAvailableAt(Long masterId, LocalDateTime time, int durationMinutes);
+  boolean isMasterAvailableAt(Long masterId, Long serviceId, LocalDateTime time, int durationMinutes);
 }

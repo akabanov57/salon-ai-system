@@ -4,6 +4,7 @@ import static org.jooq.impl.DSL.localDateTimeAdd;
 import static salon.db.jooq.generated.Tables.APPOINTMENTS;
 import static salon.db.jooq.generated.Tables.CLIENTS;
 import static salon.db.jooq.generated.Tables.MASTERS;
+import static salon.db.jooq.generated.Tables.MASTER_SERVICES;
 import static salon.db.jooq.generated.Tables.MASTER_SHIFTS;
 import static salon.db.jooq.generated.Tables.MASTER_SHIFT_BREAKS;
 import static salon.db.jooq.generated.Tables.MESSAGE_TRACES;
@@ -12,6 +13,7 @@ import static salon.db.jooq.generated.Tables.SERVICES;
 import io.avaje.validation.constraints.Valid;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Objects;
@@ -170,10 +172,10 @@ final class BookingServiceImpl implements BookingService {
         }
 
         int durationMinutes = serviceRecord.get(SERVICES.DURATION_MINUTES);
-        java.math.BigDecimal historicalPrice = serviceRecord.get(SERVICES.PRICE);
+        BigDecimal historicalPrice = serviceRecord.get(SERVICES.PRICE);
 
         // 2. Трехэтапная проверка доступности (включая константу буфера и перерывы)
-        boolean isAvailable = isMasterAvailableAtInternal(txCtx, masterId, appointmentTime, durationMinutes);
+        boolean isAvailable = isMasterAvailableAtInternal(txCtx, masterId, serviceId, appointmentTime, durationMinutes);
 
         if (!isAvailable) {
           log.warn("Database Step: Rejection. Master [{}] is unavailable at [{}].", masterId, appointmentTime);
@@ -252,9 +254,27 @@ final class BookingServiceImpl implements BookingService {
    * ПРИВАТНЫЙ ХЕЛПЕР СЛОЯ ПЕРСИСТЕНТНОСТИ: Выполняет проверку внутри заданной транзакции.
    * Полностью инкапсулирует детали jOOQ (DSLContext) внутри модуля БД.
    */
-  private boolean isMasterAvailableAtInternal(DSLContext txCtx, Long masterId, LocalDateTime time, int durationMinutes) {
+  private boolean isMasterAvailableAtInternal(DSLContext txCtx, Long masterId, Long serviceId, LocalDateTime time, int durationMinutes) {
     log.debug("Business Step: Computing isolated availability check for master [{}] at [{}] with a {}-min buffer",
         masterId, time, SANITARY_BUFFER_MINUTES);
+
+    // =====================================================================
+    // ЭТАП 0: Проверка матрицы компетенций (Умеет ли мастер делать эту услугу?)
+    // =====================================================================
+    // MASTER_SERVICES Matrix:  [MASTER_ID: 1, SERVICE_ID: 55] (Окрашивание) -> ALLOWED (True)
+    // Requested Target:        [MASTER_ID: 1, SERVICE_ID: 99] (Маникюр)     -> REJECTED (False)
+    // =====================================================================
+    boolean hasCompetence = txCtx.fetchExists(
+        txCtx.selectOne()
+            .from(MASTER_SERVICES)
+            .where(MASTER_SERVICES.MASTER_ID.eq(masterId))
+            .and(MASTER_SERVICES.SERVICE_ID.eq(serviceId))
+    );
+
+    if (!hasCompetence) {
+      log.warn("Business Step: Rejection. Master [{}] does not have specialization for service [{}].", masterId, serviceId);
+      return false; // Защитный барьер: мастер физически не умеет выполнять эту процедуру!
+    }
 
     // Фактическое время окончания самой процедуры клиента
     LocalDateTime baseEndTime = time.plusMinutes(durationMinutes);
@@ -339,7 +359,7 @@ final class BookingServiceImpl implements BookingService {
    * Использует основной dsl-контекст подключения.
    */
   @Override
-  public boolean isMasterAvailableAt(Long masterId, LocalDateTime time, int durationMinutes) {
-    return isMasterAvailableAtInternal(this.dslCtx, masterId, time, durationMinutes);
+  public boolean isMasterAvailableAt(Long masterId, Long serviceId, LocalDateTime time, int durationMinutes) {
+    return isMasterAvailableAtInternal(this.dslCtx, masterId, serviceId, time, durationMinutes);
   }
 }
