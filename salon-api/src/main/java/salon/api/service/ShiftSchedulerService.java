@@ -5,20 +5,30 @@ import java.util.List;
 
 /**
  * <h3>Доменный контракт планирования рабочих графиков сотрудников (Сценарий 5)</h3>
+ *
+ * <p>Управляет рабочим временем мастеров, обеспечивая комплаенс расписания
+ * относительно глобальных правил работы салона и существующих записей клиентов [Strict Grounding].</p>
  */
 public interface ShiftSchedulerService {
 
   /**
-   * Вариант 1 и 2: Комплексная публикация рабочих смен (как чистых, так и со встроенными перерывами).
+   * Вариант 1 и 2: Комплексная пакетная публикация рабочих смен (как чистых, так и со встроенными перерывами).
    * Выполняет двухэтапную валидацию коридоров относительно глобального расписания салона.
+   *
+   * @param commands Список команд на публикацию смен, содержащих строковые бизнес-ключи мастеров
    */
   void publishShifts(List<PublishShiftCommand> commands);
 
   /**
    * Вариант 3: Оперативное внедрение перерыва в уже существующую смену мастера.
-   * @throws net.akabanov.salon.api.exception.IntegrityViolationException если на это время есть запись
+   *
+   * @param masterAlias Уникальный разговорный псевдоним мастера (бизнес-ключ, например 'elena_colorist')
+   * @param breakStart  Дата и время фактического начала перерыва
+   * @param breakEnd    Дата и время фактического окончания перерыва
+   * @throws net.akabanov.salon.api.exception.IntegrityViolationException если на это время уже есть запись клиента
+   *                                                                      или мастер не находится на смене [Strict Grounding]
    */
-  void injectBreakIntoShift(Long masterId, LocalDateTime breakStart, LocalDateTime breakEnd);
+  void injectBreakIntoShift(String masterAlias, LocalDateTime breakStart, LocalDateTime breakEnd);
 
   /**
    * <h3>Доменная команда пакетной публикации рабочей смены мастера</h3>
@@ -26,7 +36,7 @@ public interface ShiftSchedulerService {
    * <p>Плоский контракт (Data Transfer Object), инкапсулирующий хронологические
    * параметры создаваемого рабочего дня сотрудника и его фиксированных перерывов [Strict Grounding].</p>
    *
-   * @param masterId      Уникальный идентификатор мастера салона, для которого публикуется график [Strict Grounding].
+   * @param masterAlias   Уникальный разговорный псевдоним мастера салона, для которого публикуется график [Strict Grounding].
    * @param shiftStart    Дата и время фактического начала рабочей смены сотрудника.
    *                      Обязано быть не раньше официального часа открытия салона в этот день [Strict Grounding].
    * @param shiftEnd      Дата и время фактического окончания рабочей смены сотрудника.
@@ -35,7 +45,7 @@ public interface ShiftSchedulerService {
    *                      Может быть пустым для чистых смен (Вариант 1) или содержать массив интервалов (Вариант 2) [Strict Grounding].
    */
   record PublishShiftCommand(
-      Long masterId,
+      String masterAlias,
       LocalDateTime shiftStart,
       LocalDateTime shiftEnd,
       List<BreakDto> plannedBreaks
@@ -56,5 +66,4 @@ public interface ShiftSchedulerService {
       LocalDateTime breakStart,
       LocalDateTime breakEnd
   ) {}
-
 }

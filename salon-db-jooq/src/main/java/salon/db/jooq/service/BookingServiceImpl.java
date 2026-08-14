@@ -1,6 +1,7 @@
 package salon.db.jooq.service;
 
 import static org.jooq.impl.DSL.localDateTimeAdd;
+import static org.jooq.impl.DSL.upper;
 import static salon.db.jooq.generated.Tables.APPOINTMENTS;
 import static salon.db.jooq.generated.Tables.CLIENTS;
 import static salon.db.jooq.generated.Tables.MASTERS;
@@ -15,9 +16,11 @@ import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 import org.jooq.DSLContext;
 import org.jooq.DatePart;
 import org.slf4j.Logger;
@@ -26,12 +29,19 @@ import salon.api.exception.IntegrityViolationException;
 import salon.api.exception.StorageInfrastructureException;
 import salon.api.model.Appointment;
 import salon.api.model.AppointmentStatus;
-import salon.api.model.Client;
+import salon.api.model.CatalogService;
 import salon.api.model.Master;
 import salon.api.model.PlatformType;
 import salon.api.model.ProcessMessageCommand;
 import salon.api.service.BookingService;
 
+/**
+ * <h3>Реализация инфраструктурного порта управления процессами бронирования слотов</h3>
+ *
+ * <p>Инкапсулирует в себе всю работу с реляционными таблицами СУБД через jOOQ fluent API.
+ * Реализует паттерн транзакционного кросс-маппинга для бесшовного перевода строковых бизнес-ключей
+ * ИИ-агента во внутренние числовые суррогатные идентификаторы СУБД внутри единой изолированной транзакции.</p>
+ */
 @Singleton
 final class BookingServiceImpl implements BookingService {
 
@@ -39,6 +49,9 @@ final class BookingServiceImpl implements BookingService {
 
   // FIX: Явно выделяем санитарный зазор между записями клиентов как константу класса
   private static final int SANITARY_BUFFER_MINUTES = 5;
+
+  /** Форматтер даты для генерации читаемых кодов билетов */
+  private static final DateTimeFormatter DATE_TOKEN_FORMATTER = DateTimeFormatter.ofPattern("yyMMdd");
 
   private final DSLContext dslCtx;
 
@@ -48,6 +61,9 @@ final class BookingServiceImpl implements BookingService {
     this.dslCtx = dslCtx;
   }
 
+  /**
+   * Преобразует системные ошибки jOOQ в чистые доменные исключения согласно текущей редакции проекта.
+   */
   private RuntimeException translateException(String contextMessage, Exception ex) {
     log.error("Infrastructure trapped failure details: {}", ex.getMessage(), ex);
 
@@ -73,48 +89,32 @@ final class BookingServiceImpl implements BookingService {
   }
 
   /**
-   * Выполняет поиск или генерацию профиля клиента с применением безопасной NOT NULL заглушки.
+   * [Шаг А] Внутренний транзакционный хелпер: Находит существующего или регистрирует нового клиента.
+   * Возвращает внутренний Long ID СУБД напрямую, не выпуская его за границы приватных методов слоев [Strict Grounding].
    */
-  private Client txIdOrCreateClientInternal(DSLContext txCtx, PlatformType platformType, String platformId, String displayName) {
-    log.info("Business Step: Identifying multi-channel client [{}] on platform [{}] inside transactional bounds",
-        platformId, platformType);
+  private Long txIdOrCreateClientInternal(
+      DSLContext tx, PlatformType platformType, String platformId, String displayName) {
 
-    // Отсекаем пробельный мусор и подставляем вежливый дефолтный маркер "Guest"
-    final String resolvedName = (displayName == null || displayName.isBlank()) ? "Guest" : displayName.trim();
+    // Барьер нормализации имени для защиты ограничений NOT NULL в таблице CLIENTS
+    final String normalizedName = (displayName == null || displayName.trim().isEmpty())
+        ? "Клиент Салона"
+        : displayName.trim();
 
-    // Поиск по нормализованному составному индексу в верхнем регистре
-    return txCtx.selectFrom(CLIENTS)
+    // Функциональная цепочка возвращает только ID
+    return tx.select(CLIENTS.ID)
+        .from(CLIENTS)
         .where(CLIENTS.PLATFORM_TYPE.eq(platformType.name()))
         .and(CLIENTS.PLATFORM_ID.eq(platformId))
-        .fetchOptional()
-        .map(r -> new Client(
-            r.getId(),
-            r.getPlatformType(),
-            r.getPlatformId(),
-            r.getDisplayName(),
-            r.getBonusBalance(),
-            r.getCreatedAt()
-        ))
+        .fetchOptional(CLIENTS.ID) // Точечно извлекаем Optional<Long> вместо всей строки
         .orElseGet(() -> {
-          log.info("New multi-channel client discovered. Generating profile footprint for: {}", resolvedName);
+          log.info("[Functional Registration] Creating client record with database ID generation for: [{}]", platformId);
 
-          var newRecord = txCtx.insertInto(CLIENTS)
+          return tx.insertInto(CLIENTS)
               .set(CLIENTS.PLATFORM_TYPE, platformType.name())
               .set(CLIENTS.PLATFORM_ID, platformId)
-              .set(CLIENTS.DISPLAY_NAME, resolvedName)
-              .returning()
-              .fetchOne();
-
-          Objects.requireNonNull(newRecord, "Database failed to return the newly inserted client record.");
-
-          return new Client(
-              newRecord.getId(),
-              newRecord.getPlatformType(),
-              newRecord.getPlatformId(),
-              newRecord.getDisplayName(),
-              newRecord.getBonusBalance(),
-              newRecord.getCreatedAt()
-          );
+              .set(CLIENTS.DISPLAY_NAME, normalizedName)
+              .returning(CLIENTS.ID)
+              .fetchOne(CLIENTS.ID); // Атомарно возвращаем сгенерированный BIGSERIAL
         });
   }
 
@@ -124,102 +124,112 @@ final class BookingServiceImpl implements BookingService {
         command.platformType(), command.platformId());
 
     try {
-      // Инициализируем неделимую трансляционную транзакцию высшего уровня
       dslCtx.transaction(configuration -> {
         DSLContext txCtx = configuration.dsl();
 
-        // 1. Идентифицируем или создаем нормализованного клиента в базе
-        Client client = txIdOrCreateClientInternal(
-            txCtx,
-            command.platformType(),
-            command.platformId(),
-            command.displayName()
+        // 1. Атомарно идентифицируем или создаем клиента, получая внутренний числовой ID для транзакции (Шаг А)
+        Long surrogateClientId = txIdOrCreateClientInternal(
+            txCtx, command.platformType(), command.platformId(), command.displayName()
         );
 
-        // 2. Выполняем прямую атомарную вставку входящего лога в текущей транзакции
+        // 2. Выполняем прямую вставку входящего лога в таблицу MESSAGE_TRACES в текущей транзакции
         txCtx.insertInto(MESSAGE_TRACES)
             .set(MESSAGE_TRACES.TRACE_ID, command.traceId())
             .set(MESSAGE_TRACES.DIRECTION, "INBOUND")
             .set(MESSAGE_TRACES.MESSAGE_TEXT, command.messageText())
-            .set(MESSAGE_TRACES.CLIENT_ID, client.id())
+            .set(MESSAGE_TRACES.CLIENT_ID, surrogateClientId) // Чистый внутренний ключ связывания без утечки наружу
             .execute();
 
         log.debug("[Domain Use-Case] Входящий лог транзакции {} успешно сохранен.", command.traceId());
       });
     } catch (Exception ex) {
-      // Перехватываем технический мусор jOOQ и превращаем его в чистое доменное исключение
       throw translateException("Failed to identify or create multi-channel client profile", ex);
     }
   }
 
   @Override
-  public Optional<Appointment> tryAiBooking(Long clientId, Long masterId, Long serviceId, LocalDateTime appointmentTime) {
-    log.info("Database Step: Attempting shift-and-break aware AI booking for master [{}] at service [{}]", masterId, serviceId);
+  public Optional<Appointment> tryAiBooking(String platformId, String masterAlias,
+      String serviceName, LocalDateTime appointmentTime) {
+
+    log.info("[Persistence Layer] Initiating natural key transacted allocation for Client[{}], Master[{}], Service[{}]",
+        platformId, masterAlias, serviceName);
 
     try {
       return dslCtx.transactionResult(configuration -> {
         DSLContext txCtx = configuration.dsl();
 
-        // 1. Извлекаем ОДНОВРЕМЕННО длительность и цену услуги из каталога jOOQ метамодели
-        var serviceRecord = txCtx.select(SERVICES.DURATION_MINUTES, SERVICES.PRICE)
-            .from(SERVICES)
-            .where(SERVICES.ID.eq(serviceId))
+        // ШАГ 1: АТОМАРНЫЙ КРОСС-МАППИНГ СТРОК В ID ЗА ОДИН ПРОХОД
+        // Извлекаем скрытые первичные ключи всех трех родительских таблиц одновременно, исключая паразитные JOIN-запросы
+        var ctxRecord = txCtx.select(
+                CLIENTS.ID.as("SUB_CLIENT_ID"),
+                MASTERS.ID.as("SUB_MASTER_ID"),
+                SERVICES.ID.as("SUB_SERVICE_ID"),
+                SERVICES.DURATION_MINUTES,
+                SERVICES.PRICE
+            )
+            .from(CLIENTS)
+            .crossJoin(MASTERS)
+            .crossJoin(SERVICES)
+            .where(CLIENTS.PLATFORM_ID.eq(platformId))
+            .and(MASTERS.ALIAS.eq(masterAlias.trim().toLowerCase()))
+            .and(upper(SERVICES.NAME).eq(serviceName.trim().toUpperCase()))
             .fetchOne();
 
-        if (serviceRecord == null) {
-          log.warn("Database Step: Rejection. Service [{}] does not exist in catalog.", serviceId);
+        // Защитный барьер: если хотя бы одна бизнес-строка не найдена в таблицах — ИИ мгновенно получает отказ
+        if (ctxRecord == null) {
+          log.warn("[Key Resolution Mismatch] Transacted cross-mapping failed. Natural strings do not correspond to database entries.");
           return Optional.empty();
         }
 
-        int durationMinutes = serviceRecord.get(SERVICES.DURATION_MINUTES);
-        BigDecimal historicalPrice = serviceRecord.get(SERVICES.PRICE);
+        Long surrogateClientId = ctxRecord.get("SUB_CLIENT_ID", Long.class);
+        Long surrogateMasterId = ctxRecord.get("SUB_MASTER_ID", Long.class);
+        Long surrogateServiceId = ctxRecord.get("SUB_SERVICE_ID", Long.class);
 
-        // 2. Трехэтапная проверка доступности (включая константу буфера и перерывы)
-        boolean isAvailable = isMasterAvailableAtInternal(txCtx, masterId, serviceId, appointmentTime, durationMinutes);
+        int durationMinutes = ctxRecord.get(SERVICES.DURATION_MINUTES);
+        BigDecimal historicalPrice = ctxRecord.get(SERVICES.PRICE);
+
+        // ШАГ 2: ЗАПУСК 4-ЭТАПНОГО КОМПЛАЕНС-ФИЛЬТРА ПО СКРЫТЫМ ID
+        boolean isAvailable = isMasterAvailableAtInternal(txCtx, surrogateMasterId, surrogateServiceId, appointmentTime, durationMinutes);
 
         if (!isAvailable) {
-          log.warn("Database Step: Rejection. Master [{}] is unavailable at [{}].", masterId, appointmentTime);
+          log.warn("[Booking Aborted] Target slot criteria checks failed for master alias [{}] at time [{}]", masterAlias, appointmentTime);
           return Optional.empty();
         }
 
-        // 3. Атомарное сохранение с копированием цены на дату бронирования
+        // ШАГ 3: ГЕНЕРАЦИЯ ПУБЛИЧНОГО БИЗНЕС-КОДА БИЛЕТА (Вариант А)
+        String generatedTicketCode = generateUniqueTicketCode(appointmentTime);
+
+        // ШАГ 4: АТОМАРНАЯ ЗАПИСЬ СЕССИИ В APPOINTMENTS С СОХРАНЕНИЕМ ИСТОРИЧЕСКИХ ДАННЫХ
         var record = txCtx.insertInto(APPOINTMENTS)
-            .set(APPOINTMENTS.CLIENT_ID, clientId)
-            .set(APPOINTMENTS.MASTER_ID, masterId)
-            .set(APPOINTMENTS.SERVICE_ID, serviceId)
+            .set(APPOINTMENTS.TICKET_CODE, generatedTicketCode)
+            .set(APPOINTMENTS.CLIENT_ID, surrogateClientId)
+            .set(APPOINTMENTS.MASTER_ID, surrogateMasterId)
+            .set(APPOINTMENTS.SERVICE_ID, surrogateServiceId)
             .set(APPOINTMENTS.APPOINTMENT_TIME, appointmentTime)
             .set(APPOINTMENTS.DURATION_MINUTES, durationMinutes)
-            .set(APPOINTMENTS.PRICE, historicalPrice) // Фиксируем цену мертвой хваткой на диске
+            .set(APPOINTMENTS.PRICE, historicalPrice) // Фиксируем стоимость мертвой хваткой на дату сделки
             .set(APPOINTMENTS.STATUS, AppointmentStatus.AI_PENDING)
             .returning()
             .fetchOne();
 
-        java.util.Objects.requireNonNull(record, "Database failed to persist the provisional appointment frame.");
+        Objects.requireNonNull(record, "Database runtime failed to yield persisted appointment sequence record proxy.");
 
+        // Возвращаем наверх чистую доменную сущность, собранную исключительно на бизнес-ключах
         return Optional.of(new Appointment(
-            record.getId(),
-            record.getClientId(),
-            record.getMasterId(),
-            record.getServiceId(),
+            record.getTicketCode(),
+            platformId,
+            masterAlias,
+            serviceName,
             record.getAppointmentTime(),
             record.getDurationMinutes(),
-            record.getPrice(), // Возвращаем в модель
+            record.getPrice(),
             record.getStatus(),
             record.getCreatedAt()
         ));
       });
     } catch (Exception ex) {
-      throw translateException("Failed to execute transactional AI slot reservation safety loop", ex);
+      throw translateException("Critical failure wrapped inside natural-key allocation sequence processing", ex);
     }
-  }
-
-  @Override
-  public void approveAppointment(Long appointmentId) {
-    log.info("Бизнес-шаг: Утверждение записи хозяйкой салона [id: {}]", appointmentId);
-    dslCtx.transaction(configuration -> configuration.dsl().update(APPOINTMENTS)
-        .set(APPOINTMENTS.STATUS, AppointmentStatus.APPROVED)
-        .where(APPOINTMENTS.ID.eq(appointmentId))
-        .execute());
   }
 
   /**
@@ -227,26 +237,32 @@ final class BookingServiceImpl implements BookingService {
    */
   @Override
   public List<Master> getActiveMastersForDate(LocalDateTime date) {
-    log.info("Database Step: Querying active masters working on date: [{}]", date);
-
-    LocalDateTime startOfDay = date.toLocalDate().atStartOfDay();
-    LocalDateTime endOfDay = date.toLocalDate().atTime(23, 59, 59);
+    log.debug("[Persistence Layer] Fetching active master roster for target date: [{}]", date);
 
     try {
-      return dslCtx.selectDistinct(MASTERS.ID, MASTERS.FIRST_NAME, MASTERS.LAST_NAME, MASTERS.SPECIALIZATION)
+      return dslCtx.select(
+              MASTERS.ALIAS, // FIX: Select the string ALIAS field to match the new Master domain specification
+              MASTERS.FIRST_NAME,
+              MASTERS.LAST_NAME,
+              MASTERS.SPECIALIZATION
+          )
           .from(MASTERS)
-          .join(MASTER_SHIFTS)
-          .on(MASTER_SHIFTS.MASTER_ID.eq(MASTERS.ID))
-          .where(MASTER_SHIFTS.SHIFT_START.between(startOfDay, endOfDay))
+          // Look up active masters who have a valid published work shift covering the target timeline
+          .join(MASTER_SHIFTS).on(MASTER_SHIFTS.MASTER_ID.eq(MASTERS.ID))
+          .where(MASTER_SHIFTS.SHIFT_START.le(date))
+          .and(MASTER_SHIFTS.SHIFT_END.ge(date))
           .fetch()
+          .stream()
           .map(r -> new Master(
-              r.get(MASTERS.ID),
+              r.get(MASTERS.ALIAS), // FIX: Read the exact String alias token to pass validation bounds cleanly
               r.get(MASTERS.FIRST_NAME),
               r.get(MASTERS.LAST_NAME),
               r.get(MASTERS.SPECIALIZATION)
-          ));
+          ))
+          .toList();
+
     } catch (Exception ex) {
-      throw translateException("Failed to query working master profiles for targeted calendar date", ex);
+      throw translateException("Failed to retrieve active master roster profiles for the specified date timeline", ex);
     }
   }
 
@@ -330,6 +346,7 @@ final class BookingServiceImpl implements BookingService {
     );
 
     if (hasClash) {
+      log.debug("[Stage B Reject] Requested slot collides with another client record or its sanitary buffer zone");
       return false; // Слот занят другим клиентом или его технологическим буфером
     }
 
@@ -351,7 +368,12 @@ final class BookingServiceImpl implements BookingService {
             .and(MASTER_SHIFT_BREAKS.BREAK_END.gt(time))
     );
 
-    return !hitsBreak;
+    if (hitsBreak) {
+      log.debug("[Stage C Reject] Target slot overlaps with an allocated master break window");
+      return false;
+    }
+
+    return true; // Все защитные барьеры успешно пройдены!
   }
 
   /**
@@ -362,4 +384,37 @@ final class BookingServiceImpl implements BookingService {
   public boolean isMasterAvailableAt(Long masterId, Long serviceId, LocalDateTime time, int durationMinutes) {
     return isMasterAvailableAtInternal(this.dslCtx, masterId, serviceId, time, durationMinutes);
   }
+
+  @Override
+  public List<CatalogService> searchServicesInCatalog(String keyword) {
+    log.debug("[Persistence Layer] Executing text-search matching filter inside services catalog for: [{}]", keyword);
+
+    try {
+      String pattern = "%" + keyword.trim().toUpperCase() + "%";
+
+      return dslCtx.select(SERVICES.NAME, SERVICES.DURATION_MINUTES, SERVICES.PRICE)
+          .from(SERVICES)
+          .where(org.jooq.impl.DSL.upper(SERVICES.NAME).like(pattern))
+          .fetch()
+          .stream()
+          .map(r -> new CatalogService(
+              r.get(SERVICES.NAME),
+              r.get(SERVICES.DURATION_MINUTES),
+              r.get(SERVICES.PRICE)
+          ))
+          .toList();
+    } catch (Exception ex) {
+      throw translateException("Failed to query database services catalogue by keyword", ex);
+    }
+  }
+
+  /**
+   * Генерирует уникальный, читаемый бизнес-код билета по шаблону: SB-YYMMDD-[КОРОТКИЙ ХЕШ]
+   */
+  private String generateUniqueTicketCode(LocalDateTime time) {
+    String datePart = time.format(DATE_TOKEN_FORMATTER);
+    String randomPart = UUID.randomUUID().toString().substring(0, 5).toUpperCase();
+    return String.format("SB-%s-%s", datePart, randomPart);
+  }
+
 }

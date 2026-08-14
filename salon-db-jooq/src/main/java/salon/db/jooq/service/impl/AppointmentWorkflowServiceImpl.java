@@ -23,74 +23,79 @@ final class AppointmentWorkflowServiceImpl implements AppointmentWorkflowService
   AppointmentWorkflowServiceImpl(DSLContext dslCtx) {
     this.dslCtx = dslCtx;
   }
+
   @Override
-  public void approveAppointment(Long appointmentId) {
-    executeStateTransition(appointmentId, AppointmentStatus.APPROVED,
+  public void approveAppointment(String ticketCode) {
+    executeStateTransition(ticketCode, AppointmentStatus.APPROVED,
         "Failed to transition appointment to APPROVED status due to data isolation issue");
   }
 
   @Override
-  public void cancelAppointment(Long appointmentId) {
-    executeStateTransition(appointmentId, AppointmentStatus.CANCELED,
+  public void cancelAppointment(String ticketCode) {
+    executeStateTransition(ticketCode, AppointmentStatus.CANCELED,
         "Failed to transition appointment to CANCELED status due to data isolation issue");
   }
 
   @Override
-  public void completeAppointment(Long appointmentId) {
-    executeStateTransition(appointmentId, AppointmentStatus.COMPLETED,
+  public void completeAppointment(String ticketCode) {
+    executeStateTransition(ticketCode, AppointmentStatus.COMPLETED,
         "Failed to transition appointment to COMPLETED status due to data isolation issue");
   }
 
   /**
-   * Centralized transactional state transition executor engine.
-   * Enforces strict row locking and invokes localized State Machine validation logic.
+   * Централизованный бесцифровой движок управления транзакционными переходами статусов.
+   * Оперирует исключительно естественным ключом TICKET_CODE и защищает от race conditions через FOR UPDATE.
    */
-  private void executeStateTransition(Long appointmentId, AppointmentStatus targetStatus, String exceptionContext) {
-    log.info("[Domain Use-Case] Request to switch appointment [{}] status directly to [{}]", appointmentId, targetStatus);
+  private void executeStateTransition(String ticketCode, AppointmentStatus targetStatus, String exceptionContext) {
+    log.info("[Domain Workflow] Request to switch ticket [{}] status directly to [{}]", ticketCode, targetStatus);
+
+    if (ticketCode == null || ticketCode.trim().isEmpty()) {
+      throw new IntegrityViolationException("Операция отклонена: Код билета визита не может быть пустым.");
+    }
 
     try {
       dslCtx.transaction(configuration -> {
         DSLContext tx = configuration.dsl();
 
-        // STEP 1: CONCURRENT ISOLATION RINGS - Fetch row with a pessimistic row-level lock
+        // ШАГ 1: Пессимистическая блокировка строки по уникальному бизнес-ключу TICKET_CODE
         var record = tx.select(APPOINTMENTS.STATUS)
             .from(APPOINTMENTS)
-            .where(APPOINTMENTS.ID.eq(appointmentId))
-            .forUpdate() // PESSIMISTIC LOCK: Stops race condition collisions in mid-air
+            .where(APPOINTMENTS.TICKET_CODE.eq(ticketCode.trim()))
+            .forUpdate() // Жёсткий замок СУБД против параллельных кликов менеджеров в Vaadin UI
             .fetchOne();
 
         if (record == null) {
           throw new IntegrityViolationException(String.format(
-              "Операция отклонена: Запись с идентификатором [%d] не найдена в базе данных салона.", appointmentId
+              "Операция отклонена: Запись с кодом билета [%s] не найдена в базе данных салона.", ticketCode
           ));
         }
 
-        // STEP 2: STATE MACHINE COMPLIANCE CHECK
-        AppointmentStatus currentStatus = record.get(APPOINTMENTS.STATUS);
+        // ШАГ 2: Проверка легитимности шага в доменном конечном автомате
+        AppointmentStatus currentStatus = record.get(APPOINTMENTS.STATUS); // Чистый jOOQ Enum маппинг
 
         if (!currentStatus.canTransitionTo(targetStatus)) {
-          log.warn("[State Machine Clash] Illegal status mutation attempted: [{}] cannot transition to [{}]",
-              currentStatus, targetStatus);
+          log.warn("[State Machine Clash] Prohibited mutation requested: [{}] -> [{}] for ticket [{}]",
+              currentStatus, targetStatus, ticketCode);
           throw new IntegrityViolationException(String.format(
-              "Ошибка конечного автомата: Запрещено переводить запись [%d] из текущего статуса [%s] в запрашиваемый [%s]!",
-              appointmentId, currentStatus, targetStatus
+              "Ошибка конечного автомата: Запрещено переводить запись [%s] из текущего статуса [%s] в запрашиваемый [%s]!",
+              ticketCode, currentStatus, targetStatus
           ));
         }
 
-        // STEP 3: PERSIST MUTATION STATE TO STORAGE
+        // ШАГ 3: Фиксация мутации состояния в СУБД
         int rowsUpdated = tx.update(APPOINTMENTS)
             .set(APPOINTMENTS.STATUS, targetStatus)
-            .where(APPOINTMENTS.ID.eq(appointmentId))
+            .where(APPOINTMENTS.TICKET_CODE.eq(ticketCode.trim()))
             .execute();
 
         if (rowsUpdated != 1) {
           throw new StorageInfrastructureException(String.format(
-              "Failed to rewrite status metadata row for ticket reference [%d]. Update mismatch.", appointmentId
+              "Failed to update status metadata row for ticket reference [%s]. Row mismatch.", ticketCode
           ));
         }
 
-        log.info("[State Machine Success] Appointment [{}] cleanly mutated from [{}] to [{}]",
-            appointmentId, currentStatus, targetStatus);
+        log.info("[State Machine Success] Ticket [{}] cleanly mutated from [{}] to [{}]",
+            ticketCode, currentStatus, targetStatus);
       });
     } catch (Exception ex) {
       throw translateException(exceptionContext, ex);

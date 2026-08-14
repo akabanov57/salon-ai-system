@@ -3,9 +3,10 @@ package salon.ai.engine.service;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.verify;
+import static org.mockito.ArgumentMatchers.anyString;
 
 import io.avaje.inject.BeanScope;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
@@ -18,6 +19,7 @@ import org.mockito.Mockito;
 import salon.ai.engine.internal.service.BookingTools;
 import salon.api.model.Appointment;
 import salon.api.model.AppointmentStatus;
+import salon.api.model.CatalogService;
 import salon.api.model.Master;
 import salon.api.service.BookingService;
 
@@ -36,168 +38,155 @@ import salon.api.service.BookingService;
 class BookingToolsImplTest {
 
   private static BeanScope beanScope;
-
-  // Статические поля для сохранения контекста между тестами
-  private static final BookingService bookingServiceMock = Mockito.mock(BookingService.class);
-
+  private static BookingService bookingServiceMock;
   private static BookingTools bookingTools;
 
   @BeforeAll
-  static void startPipeline() {
+  static void setUpComponentContainer() {
+    // 1. Вручную создаем изолированный Mock для внешней зависимости ровно один раз
+    bookingServiceMock = Mockito.mock(BookingService.class);
+
+    // 2. Инициализируем локальный контейнер Avaje BeanScope, принудительно внедряя туда наш Mock
     beanScope = BeanScope.builder()
-        .beans(bookingServiceMock)
+        .beans(bookingServiceMock) // Добавляем заглушку как легитимный бин для @External
         .build();
+
+    // 3. Извлекаем из собранного контейнера готовый ИИ-инструмент
+    bookingTools = beanScope.get(BookingToolsImpl.class);
   }
 
   @AfterAll
-  static void stopPipeline() {
+  static void tearDownComponentContainer() {
     if (beanScope != null) {
-      beanScope.close();
+      beanScope.close(); // Освобождаем ресурсы контейнера после прохождения всех тестов класса
     }
   }
 
   @BeforeEach
-  void setUp() {
+  void resetMockState() {
+    // Мягко сбрасываем конфигурации вызовов мока перед каждым тестом, предотвращая взаимное влияние тестов
     Mockito.reset(bookingServiceMock);
-    bookingTools = beanScope.get(BookingToolsImpl.class);
   }
 
   /**
-   * <h3>БИЗНЕС-КОНТЕКСТ: Получение сетки активных мастеров салона</h3>
-   * <p><b>Сценарий:</b> В базе данных зарегистрированы доступные стилисты.</p>
-   * <p><b>Ожидаемое поведение:</b> Инструмент вычищает технические рекорды jOOQ и преобразует
-   * массив объектов в плоскую текстовую сетку, по которой ЛЛМ сможет сориентировать клиента.</p>
-   */
-  @Test
-  void shouldFormatStylistsGridWhenMastersAreAvailable() {
-    // Arrange - FIX: Removed the trailing 'isActive' boolean parameter from Master records
-    Master master1 = new Master(1L, "Elena", "Petrova", "Top Colorist");
-    Master master2 = new Master(2L, "Anna", "Ivanova", "Stylist");
-
-    // FIX: Mock the new getActiveMastersForDate dynamic signature instead
-    Mockito.when(bookingServiceMock.getActiveMastersForDate(any(LocalDateTime.class)))
-        .thenReturn(List.of(master1, master2));
-
-    // Act
-    String result = bookingTools.getAvailableStylists();
-
-    // Assert
-    String expected = "ID: 1 | Name: Elena Petrova | Specialty: Top Colorist\n" +
-        "ID: 2 | Name: Anna Ivanova | Specialty: Stylist";
-    assertEquals(expected, result);
-    verify(bookingServiceMock).getActiveMastersForDate(any(LocalDateTime.class));
-  }
-
-  /**
-   * <h3>БИЗНЕС-КОНТЕКСТ: Получение сетки мастеров при пустом расписании</h3>
-   * <p><b>Сценарий:</b> В базе данных нет ни одного активного мастера на выбранную дату.</p>
-   * <p><b>Ожидаемое поведение:</b> Вместо пустой строки или падения, инструмент отдает вежливый
-   * маркерный ответ, сообщающий ИИ, что на данный момент доступных специалистов нет.</p>
-   */
-  @Test
-  void shouldReturnFriendlyMessageWhenNoStylistsExist() {
-    // Arrange - FIX: Mock the new getActiveMastersForDate dynamic signature
-    Mockito.when(bookingServiceMock.getActiveMastersForDate(any(LocalDateTime.class)))
-        .thenReturn(Collections.emptyList());
-
-    // Act
-    String result = bookingTools.getAvailableStylists();
-
-    // Assert
-    assertEquals("Currently, there are no active stylists registered in the salon schedule system.", result);
-  }
-
-  /**
-   * <h3>Test AI Tool: Successful execution path for vacant slot allocation</h3>
-   * <p><b>Context:</b> The generative AI engine detects all parameters and triggers the tool.
-   * The tool must safely parse the ISO-8601 string, forward the transaction request with the
-   * extracted service ID, and map the domain response to a client-facing string template [Strict Grounding].</p>
+   * <h3>Тест 1: Успешное предварительное бронирование слота времени</h3>
    */
   @Test
   void shouldReturnSuccessStringWhenTimeSlotIsVacant() {
     // Arrange
-    long clientId = 10L;
-    long masterId = 1L;
-    long serviceId = 55L; // Strict catalog service identifier
+    String platformId = "TG-123456";
+    String masterAlias = "elena_colorist";
+    String serviceName = "Женская стрижка модельная";
     String isoTimeStr = "2026-07-25T15:30";
     LocalDateTime parsedTime = LocalDateTime.parse(isoTimeStr);
 
-    // Instantiate a valid domain model matching the new schema fields (including ServiceId and historical Price)
     Appointment dummyApp = new Appointment(
-        42L,
-        clientId,
-        masterId,
-        serviceId, // Injected service identifier anchor
+        "SB-260725-ABCDE",
+        platformId,
+        masterAlias,
+        serviceName,
         parsedTime,
-        60, // Normal duration minutes extracted on server-side
-        java.math.BigDecimal.valueOf(2500.00), // Historical audit price
+        60,
+        BigDecimal.valueOf(2500.00),
         AppointmentStatus.AI_PENDING,
         LocalDateTime.now()
     );
 
-    // Mock the updated service signature
-    Mockito.when(bookingServiceMock.tryAiBooking(clientId, masterId, serviceId, parsedTime))
+    Mockito.when(bookingServiceMock.tryAiBooking(platformId, masterAlias, serviceName, parsedTime))
         .thenReturn(Optional.of(dummyApp));
 
-    // Act: Invoke the modified tool method dropping duration parameters entirely
-    String result = bookingTools.bookAppointmentSlot(clientId, masterId, serviceId, isoTimeStr);
+    // Act
+    String result = bookingTools.bookAppointmentSlot(platformId, masterAlias, serviceName, isoTimeStr);
 
-    // Assert: Verify perfect string serialization output expected by the chat runtime loop
-    String expected = "SUCCESS: Time slot reserved provisionally. Ticket ID: 42. Status is currently AI_PENDING. " +
+    // Assert
+    String expected = "SUCCESS: Time slot reserved provisionally. Ticket Code: SB-260725-ABCDE. Status is currently AI_PENDING. " +
         "The client must await final confirmation from the salon owner.";
-    assertEquals(expected, result, "При успешном бронировании в БД инструмент обязан выдать строку подтверждения с номером тикета.");
+    assertEquals(expected, result);
   }
 
   /**
-   * <h3>БИЗНЕС-КОНТЕКСТ: Занятое время или конфликт расписания</h3>
-   * <p><b>Сценарий:</b> Клиент пытается записаться на время, которое уже занято другим гостем
-   * либо пересекает окно отдыха/обеда мастера [Strict Grounding].</p>
-   * <p><b>Ожидаемое поведение:</b> База отклоняет операцию (возвращает Optional.empty), а инструмент
-   * сообщает нейросети строку "FAILURE", давая команду ИИ-ассистенту предложить клиенту другие свободные слоты [Strict Grounding].</p>
+   * <h3>Тест 2: Отказ в бронировании при занятом слоте или конфликте расписания</h3>
    */
   @Test
-  void shouldReturnFailureStringWhenTimeSlotIsOccupied() {
-    // Arrange: Mock the updated signature with three Long parameter matchers instead of anyInt()
-    Mockito.when(bookingServiceMock.tryAiBooking(
-            Mockito.anyLong(),
-            Mockito.anyLong(),
-            Mockito.anyLong(), // Matches the new serviceId parameter boundary
-            Mockito.any(LocalDateTime.class)
-        ))
+  void shouldReturnFailureStringWhenTimeSlotIsOccupiedOrInvalid() {
+    // Arrange
+    Mockito.when(bookingServiceMock.tryAiBooking(anyString(), anyString(), anyString(), any(LocalDateTime.class)))
         .thenReturn(Optional.empty());
 
-    // Act: Invoke using the updated method signature (clientId, masterId, serviceId, dateTimeStr)
-    String result = bookingTools.bookAppointmentSlot(10L, 1L, 55L, "2026-07-25T15:30");
+    // Act
+    String result = bookingTools.bookAppointmentSlot("TG-123", "elena_colorist", "Невалидная услуга", "2026-07-25T15:30");
 
-    // Assert: Aligned with the exact updated text template defined inside BookingToolsImpl
+    // Assert
     String expected = "FAILURE: This time slot is already fully booked, clashes with an existing appointment, " +
-        "or conflicts with the stylist's rest break. Please offer alternative slots.";
-
-    assertEquals(expected, result,
-        "При накладке расписания инструмент обязан выдать инструкцию FAILURE для переориентации ЛЛМ.");
+        "lacks master qualification, or conflicts with the stylist's rest break. Please offer alternative slots.";
+    assertEquals(expected, result);
   }
 
   /**
-   * <h3>БИЗНЕС-КОНТЕКСТ: Некорректный формат входящих данных от ИИ</h3>
-   * <p><b>Сценарий:</b> Нейросеть ошиблась при разборе текста и передала некорректную строку даты
-   * (например, "завтра") вместо строгого ISO-стандарта [Strict Grounding].</p>
-   * <p><b>Ожидаемое поведение:</b> Метод перехватывает ошибку парсинга ISO-строки, предотвращая падение
-   * всего потока выполнения, и возвращает маркер "ERROR" для исправления аргументов ИИ-модели [Strict Grounding].</p>
+   * <h3>Тест 3: Перехват ошибок при некорректном ISO-формате даты от ИИ</h3>
    */
   @Test
   void shouldReturnErrorStringWhenDateTimeFormatIsMalformed() {
-    // Arrange
-    long clientId = 10L;
-    long masterId = 1L;
-    long serviceId = 55L; // Передаем легитимный ID услуги для прохождения компиляции
-    String malformedDate = "Broken-Date-String";
-
-    // Act: Вызываем метод с новой сигнатурой (clientId, masterId, serviceId, dateTimeStr)
-    String result = bookingTools.bookAppointmentSlot(clientId, masterId, serviceId, malformedDate);
+    // Act
+    String result = bookingTools.bookAppointmentSlot("TG-123", "elena_colorist", "Стрижка", "Broken-Date-String");
 
     // Assert
-    assertTrue(result.startsWith("ERROR: Invalid parameters passed or parsing failure occurred."),
-        "При поврежденной строке даты инструмент обязан вернуть мягкую строку ошибки разбора.");
+    assertTrue(result.startsWith("ERROR: Invalid parameters passed or parsing failure occurred."));
+  }
+
+  /**
+   * <h3>Тест 4: Успешный полнотекстовый поиск услуг в каталоге</h3>
+   */
+  @Test
+  void shouldReturnFormattedStringWhenServicesMatchSearchKeyword() {
+    // Arrange
+    String keyword = "стрижка";
+    CatalogService match = new CatalogService("Женская стрижка модельная", 60, BigDecimal.valueOf(2500.00));
+
+    Mockito.when(bookingServiceMock.searchServicesInCatalog(keyword))
+        .thenReturn(List.of(match));
+
+    // Act
+    String result = bookingTools.searchServices(keyword);
+
+    // Assert
+    String expected = "Official Service Name: 'Женская стрижка модельная' | Duration: 60 min | Price: 2500.00 rub";
+    assertEquals(expected, result);
+  }
+
+  /**
+   * <h3>Тест 5: Отсутствие совпадений при поиске по ключевому слову</h3>
+   */
+  @Test
+  void shouldReturnFailureStringWhenNoServicesMatchKeyword() {
+    // Arrange
+    Mockito.when(bookingServiceMock.searchServicesInCatalog(anyString()))
+        .thenReturn(Collections.emptyList());
+
+    // Act
+    String result = bookingTools.searchServices("массаж");
+
+    // Assert
+    String expected = "FAILURE: No services found matching 'массаж' in our menu. Please ask the client to clarify their request.";
+    assertEquals(expected, result);
+  }
+
+  /**
+   * <h3>Тест 6: Форматирование списка активных стилистов через бизнес-алиасы</h3>
+   */
+  @Test
+  void shouldReturnFormattedRosterListingMasterAliases() {
+    // Arrange
+    Master activeMaster = new Master("elena_colorist", "Elena", "Petrova", "Top Colorist");
+    Mockito.when(bookingServiceMock.getActiveMastersForDate(any(LocalDateTime.class)))
+        .thenReturn(List.of(activeMaster));
+
+    // Act
+    String result = bookingTools.getAvailableStylists();
+
+    // Assert
+    String expected = "Alias: 'elena_colorist' | Name: Elena Petrova | Specialty: Top Colorist";
+    assertEquals(expected, result);
   }
 
 }

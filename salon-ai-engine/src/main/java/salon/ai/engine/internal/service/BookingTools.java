@@ -14,6 +14,15 @@ package salon.ai.engine.internal.service;
  * This component acts as a high-utility translation boundary. It takes text-based parameters from the AI,
  * passes them into type-safe business services, and returns a clean string explanation back to the AI
  * to guide the next conversational turn.</p>
+ *
+ * <h2>DESIGN INTENT: AI Function-Calling Contract Port</h2>
+ * Этот интерфейс определяет изолированные границы доступных действий, которые ИИ-модель
+ * может выполнять внутри инфраструктуры салона красоты (LangChain4j Tools Contract).
+ *
+ * <p><b>АРХИТЕКТУРНАЯ РОЛЬ:</b>
+ * Компонент полностью переведен на использование естественных бизнес-ключей (Natural/Business Keys).
+ * Нейросеть больше не оперирует сырыми числовыми ID базы данных, что предотвращает утечку абстракций,
+ * снижает галлюцинации LLM и защищает СУБД от некорректных параметров.</p>
  */
 public interface BookingTools {
 
@@ -27,17 +36,17 @@ public interface BookingTools {
   String getAvailableStylists();
 
   /**
-   * Executes a transactional appointment slot reservation within the core domain schedule matrix.
-   * Used by the AI after it successfully collects all mandatory parameters from the chat interaction.
-   *
-   * @param clientId    The unique database identifier tracking the verified client profile.
-   * @param masterId    The unique database identifier tracking the selected stylist.
-   * @param serviceId   The unique database identifier tracking the requested service from the official catalog.
-   * @param dateTimeStr The target date and time string formatted strictly in ISO-8601 local standard
-   *                    notation (e.g., {@code 2026-08-12T14:00}).
-   * @return A descriptive text string detailing the reservation outcome (e.g., successful creation
-   *         with a ticket tracking ID, or a failure notice if a time conflict occurs) which the AI
-   *         will present back to the user.
+   * Осуществляет транзакционное предварительное бронирование слота времени на основе строковых бизнес-ключей.
    */
-  String bookAppointmentSlot(long clientId, long masterId, long serviceId, String dateTimeStr);
+  String bookAppointmentSlot(String platformId, String masterAlias, String serviceName, String dateTimeStr);
+
+  /**
+   * Searches the official salon catalog for active services matching a textual keyword or description.
+   * Used by the AI to look up precise system database service IDs before initiating a booking.
+   *
+   * @param searchKeyword A textual query representing the requested procedure (e.g., "haircut", "coloring").
+   * @return A formatted text string listing matching services, their unique system database IDs,
+   *         normative execution durations, and prices. Returns an instructive error if no services match.
+   */
+  String searchServices(String searchKeyword);
 }

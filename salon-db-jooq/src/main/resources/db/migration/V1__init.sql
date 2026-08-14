@@ -26,11 +26,16 @@ CREATE INDEX IDX_CLIENTS_PLATFORM_LOOKUP ON CLIENTS (PLATFORM_TYPE, PLATFORM_ID)
 CREATE TABLE MASTERS
 (
     ID             BIGSERIAL PRIMARY KEY,
+    ALIAS          VARCHAR(64)  NOT NULL, -- Уникальный разговорный псевдоним для ИИ ('elena_colorist')
     FIRST_NAME     VARCHAR(64)  NOT NULL,
     LAST_NAME      VARCHAR(64)  NOT NULL,
-    SPECIALIZATION VARCHAR(128) NOT NULL,              -- Core skill context mapping (e.g., 'Top Colorist')
-    CREATED_AT     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+    SPECIALIZATION VARCHAR(128) NOT NULL, -- Core skill context mapping (e.g., 'Top Colorist')
+    CREATED_AT     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT UQ_MASTER_ALIAS UNIQUE (ALIAS)
 );
+
+CREATE INDEX IDX_MASTERS_ALIAS ON MASTERS (ALIAS);
 
 
 -- =====================================================================
@@ -83,12 +88,14 @@ CREATE INDEX IDX_MASTER_SHIFT_BREAKS_LOOKUP ON MASTER_SHIFT_BREAKS (SHIFT_ID, BR
 CREATE TABLE SERVICES
 (
     ID               BIGSERIAL PRIMARY KEY,
-    NAME             VARCHAR(128) NOT NULL,
+    NAME             VARCHAR(128) NOT NULL, -- Официальное наименование (уникальный бизнес-ключ)
     DURATION_MINUTES INT          NOT NULL, -- Объективное нормативное время услуги
     PRICE            NUMERIC(10,2) NOT NULL,
     CREATED_AT       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    CONSTRAINT CHK_SERVICE_DURATION_MUST_BE_POSITIVE CHECK (DURATION_MINUTES > 0)
+    CONSTRAINT UQ_SERVICE_NAME UNIQUE (NAME),
+    CONSTRAINT CHK_SERVICE_DURATION_MUST_BE_POSITIVE CHECK (DURATION_MINUTES > 0),
+    CONSTRAINT CHK_SERVICE_PRICE CHECK (PRICE >= 0)
 );
 
 -- =====================================================================
@@ -128,17 +135,22 @@ CREATE INDEX IDX_MASTER_SERVICES_LOOKUP ON MASTER_SERVICES (MASTER_ID, SERVICE_I
 -- =====================================================================
 CREATE TABLE APPOINTMENTS
 (
-    ID               BIGSERIAL PRIMARY KEY,
-    CLIENT_ID        BIGINT      NOT NULL,
-    MASTER_ID        BIGINT      NOT NULL,
+    ID               BIGSERIAL PRIMARY KEY, -- Внутренний суррогатный ключ для персистентного слоя и быстрых связей в СУБД
+    TICKET_CODE      VARCHAR(32)   NOT NULL, -- Уникальный публичный бизнес-код записи визита (например, 'SB-20260813-A7X')
+    CLIENT_ID        BIGINT      NOT NULL, -- Скрытый внешний ключ связи с родителем в таблице CLIENTS
+    MASTER_ID        BIGINT      NOT NULL, -- Скрытый внешний ключ связи с родителем в таблице MASTERS
     SERVICE_ID       BIGINT      NOT NULL, -- FIX: Прямая жесткая привязка к каталогу услуг
-    APPOINTMENT_TIME TIMESTAMP   NOT NULL,
+    APPOINTMENT_TIME TIMESTAMP   NOT NULL, -- Дата и точное время начала сеанса визита
     DURATION_MINUTES INT         NOT NULL, -- Копируется из SERVICES для стабильности исторического аудита
     PRICE            NUMERIC(10,2) NOT NULL, -- FIX: Фиксация исторической стоимости на дату записи
     STATUS           VARCHAR(32) NOT NULL, -- 'AI_PENDING', 'APPROVED', 'CANCELED'
     CREATED_AT       TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
--- Железный заслон от невалидных строк на уровне движка хранения данных
+    -- Ограничение уникальности публичного бизнес-кода билета визита
+    CONSTRAINT UQ_APPOINTMENT_TICKET_CODE
+        UNIQUE (TICKET_CODE),
+
+    -- Железный заслон от невалидных строк на уровне движка хранения данных
     CONSTRAINT CHK_APPOINTMENT_STATUS_ENUM_COMPLIANCE
         CHECK (STATUS IN ('AI_PENDING', 'APPROVED', 'CANCELED', 'COMPLETED')),
 
@@ -153,8 +165,11 @@ CREATE TABLE APPOINTMENTS
     CONSTRAINT FK_APPOINTMENT_LINKS_TO_SERVICE FOREIGN KEY (SERVICE_ID) REFERENCES SERVICES (ID) ON DELETE RESTRICT
 );
 
-CREATE INDEX IDX_APPOINTMENTS_SCHEDULE ON APPOINTMENTS (MASTER_ID, appointment_time);
+-- Индексы для обеспечения максимального быстродействия поисковых операций
+CREATE UNIQUE INDEX IDX_APPOINTMENTS_TICKET_CODE ON APPOINTMENTS (TICKET_CODE);
+CREATE INDEX IDX_APPOINTMENTS_LOOKUP_COMPLEX ON APPOINTMENTS (MASTER_ID, STATUS, APPOINTMENT_TIME);
 CREATE INDEX IDX_APPOINTMENTS_CLIENT ON APPOINTMENTS (CLIENT_ID);
+CREATE INDEX IDX_APPOINTMENTS_SERVICE_ID ON APPOINTMENTS (SERVICE_ID);
 
 
 -- =====================================================================
@@ -216,7 +231,7 @@ CREATE TABLE SALON_WEEKLY_SCHEDULE
     DAY_OF_WEEK   VARCHAR(16) PRIMARY KEY, -- 'MONDAY', 'TUESDAY', ... 'SUNDAY'
     IS_CLOSED     BOOLEAN     NOT NULL DEFAULT FALSE,
     OPEN_TIME     TIME        NOT NULL DEFAULT '09:00:00',
-    CLOSE_TIME    TIME        NOT NULL DEFAULT '21:00:00',
+    CLOSE_TIME    TIME        NOT NULL DEFAULT '20:00:00',
     CREATED_AT    TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     -- Гарантируем валидность временного интервала на уровне ядра СУБД
@@ -226,7 +241,7 @@ CREATE TABLE SALON_WEEKLY_SCHEDULE
 -- 7.2. ДИНАМИЧЕСКИЕ КАЛЕНДАРНЫЕ ИСКЛЮЧЕНИЯ (ПРАЗДНИКИ, ПЕРЕНОСЫ, МУТАЦИИ ГРАФИКА)
 CREATE TABLE SALON_CALENDAR_EXCEPTIONS
 (
-    CALENDAR_DATE DATE      PRIMARY KEY, -- Например, '2026-12-31'
+    CALENDAR_DATE DATE      PRIMARY KEY, -- Например, '2026-12-31'. Конкретная дата исключения.
     IS_CLOSED     BOOLEAN   NOT NULL DEFAULT FALSE,
     OPEN_TIME     TIME,
     CLOSE_TIME    TIME,

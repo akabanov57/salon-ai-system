@@ -40,7 +40,6 @@ public class AppointmentWorkflowServiceIntegrationTest {
 
   @BeforeEach
   void setUpCleanIsolatedH2State() {
-    // Rigid foreign key isolation and complete state clearing pass
     dslCtx.execute("SET REFERENTIAL_INTEGRITY FALSE");
     dslCtx.truncate(APPOINTMENTS).execute();
     dslCtx.truncate(SERVICES).execute();
@@ -48,7 +47,6 @@ public class AppointmentWorkflowServiceIntegrationTest {
     dslCtx.truncate(MASTERS).execute();
     dslCtx.execute("SET REFERENTIAL_INTEGRITY TRUE");
 
-    // Establish fundamental context data rows
     dslCtx.insertInto(CLIENTS)
         .set(CLIENTS.ID, mockClientId)
         .set(CLIENTS.PLATFORM_TYPE, "TELEGRAM")
@@ -56,8 +54,10 @@ public class AppointmentWorkflowServiceIntegrationTest {
         .set(CLIENTS.DISPLAY_NAME, "Test Client")
         .execute();
 
+    final String mockMasterAlias = "anna_manicure_w4";
     dslCtx.insertInto(MASTERS)
         .set(MASTERS.ID, mockMasterId)
+        .set(MASTERS.ALIAS, mockMasterAlias)
         .set(MASTERS.FIRST_NAME, "Anna")
         .set(MASTERS.LAST_NAME, "Master")
         .set(MASTERS.SPECIALIZATION, "Manicure")
@@ -72,17 +72,16 @@ public class AppointmentWorkflowServiceIntegrationTest {
   }
 
   /**
-   * <h3>Test 1 (Happy Path Transition Sequence): Complete legitimate state execution chain</h3>
-   *
-   * <p><b>Business Context:</b> A manager accesses the Vaadin dashboard, views an AI-generated draft row,
-   * clicks 'Approve', and later flags the session as successfully served at the day's end.</p>
+   * <h3>Тест 1: Успешная цепочка переходов (AI_PENDING -> APPROVED -> COMPLETED)</h3>
    */
   @Test
   void shouldSuccessfullyProgressStatusWhenFollowingLegitimateTransitionChain() {
-    // Arrange: Persist an initial AI draft ticket record
-    Long ticketId = 5555L;
+    // Arrange: Назначаем уникальный строковый бизнес-код билета визита
+    String targetTicketCode = "SB-20260813-HAPPY";
+
     dslCtx.insertInto(APPOINTMENTS)
-        .set(APPOINTMENTS.ID, ticketId)
+        .set(APPOINTMENTS.ID, 5555L)
+        .set(APPOINTMENTS.TICKET_CODE, targetTicketCode) // Бизнес-ключ
         .set(APPOINTMENTS.CLIENT_ID, mockClientId)
         .set(APPOINTMENTS.MASTER_ID, mockMasterId)
         .set(APPOINTMENTS.SERVICE_ID, mockServiceId)
@@ -92,89 +91,77 @@ public class AppointmentWorkflowServiceIntegrationTest {
         .set(APPOINTMENTS.STATUS, AppointmentStatus.AI_PENDING)
         .execute();
 
-    // Act & Assert Step A: Execute legitimate approval shift (AI_PENDING -> APPROVED)
-    assertDoesNotThrow(() -> workflowService.approveAppointment(ticketId),
-        "Moving a ticket from AI_PENDING to APPROVED is completely valid.");
+    // Act & Assert Шаг А: Одобрение по TICKET_CODE
+    assertDoesNotThrow(() -> workflowService.approveAppointment(targetTicketCode),
+        "Перевод записи из AI_PENDING в APPROVED по ticketCode легитимен.");
 
     AppointmentStatus statusAfterApproval = dslCtx.select(APPOINTMENTS.STATUS)
-        .from(APPOINTMENTS).where(APPOINTMENTS.ID.eq(ticketId)).fetchOneInto(AppointmentStatus.class);
+        .from(APPOINTMENTS).where(APPOINTMENTS.TICKET_CODE.eq(targetTicketCode)).fetchOneInto(AppointmentStatus.class);
     assertEquals(AppointmentStatus.APPROVED, statusAfterApproval);
 
-    // Act & Assert Step B: Execute terminal completion shift (APPROVED -> COMPLETED)
-    assertDoesNotThrow(() -> workflowService.completeAppointment(ticketId),
-        "Moving an APPROVED appointment to COMPLETED is a fully legal state mutation.");
+    // Act & Assert Шаг Б: Завершение визита по TICKET_CODE
+    assertDoesNotThrow(() -> workflowService.completeAppointment(targetTicketCode),
+        "Перевод одобренной записи в статус COMPLETED разрешен законом автомата.");
 
     AppointmentStatus statusAfterCompletion = dslCtx.select(APPOINTMENTS.STATUS)
-        .from(APPOINTMENTS).where(APPOINTMENTS.ID.eq(ticketId)).fetchOneInto(AppointmentStatus.class);
+        .from(APPOINTMENTS).where(APPOINTMENTS.TICKET_CODE.eq(targetTicketCode)).fetchOneInto(AppointmentStatus.class);
     assertEquals(AppointmentStatus.COMPLETED, statusAfterCompletion);
   }
 
   /**
-   * <h3>Test 2 (State Machine Crash Guard): Forcefully intercept and abort illegal jumps</h3>
-   *
-   * <p><b>Business Context:</b> An erroneous network packet or user action attempts to jump an
-   * unapproved AI draft directly into an execution state, violating core sequence integrity parameters.</p>
+   * <h3>Тест 2: Запрет нелегального прыжка статуса (AI_PENDING -> COMPLETED)</h3>
    */
   @Test
   void shouldThrowIntegrityViolationExceptionWhenExecutingProhibitedStateJump() {
-    // Arrange: Establish base raw draft slot row
-    Long targetTicketId = 7777L;
+    String clashingTicketCode = "SB-20260813-CLASH";
+
     dslCtx.insertInto(APPOINTMENTS)
-        .set(APPOINTMENTS.ID, targetTicketId)
+        .set(APPOINTMENTS.ID, 7777L)
+        .set(APPOINTMENTS.TICKET_CODE, clashingTicketCode)
         .set(APPOINTMENTS.CLIENT_ID, mockClientId)
         .set(APPOINTMENTS.MASTER_ID, mockMasterId)
         .set(APPOINTMENTS.SERVICE_ID, mockServiceId)
         .set(APPOINTMENTS.APPOINTMENT_TIME, LocalDateTime.now().plusDays(2))
         .set(APPOINTMENTS.DURATION_MINUTES, 45)
         .set(APPOINTMENTS.PRICE, java.math.BigDecimal.valueOf(1500.00))
-        .set(APPOINTMENTS.STATUS, AppointmentStatus.AI_PENDING) // Draft baseline
+        .set(APPOINTMENTS.STATUS, AppointmentStatus.AI_PENDING)
         .execute();
 
-    // Act & Assert: Directly push for COMPLETED execution bypassing approval filters
+    // Act & Assert: Вызов по строковому бизнес-ключу обязан выбросить ошибку
     IntegrityViolationException exceptions = assertThrows(IntegrityViolationException.class, () ->
-            workflowService.completeAppointment(targetTicketId),
-        "An AI_PENDING ticket must never bypass the APPROVED confirmation layer."
+        workflowService.completeAppointment(clashingTicketCode)
     );
 
-    assertTrue(exceptions.getMessage().contains("Ошибка конечного автомата"),
-        "The caught error sequence description must specify a clear State Machine clash failure message.");
+    assertTrue(exceptions.getMessage().contains("Ошибка конечного автомата"));
 
-    // Verification: Assert that row properties remained unaffected on disk during transaction failure loops
     AppointmentStatus unalteredStatus = dslCtx.select(APPOINTMENTS.STATUS)
-        .from(APPOINTMENTS).where(APPOINTMENTS.ID.eq(targetTicketId)).fetchOneInto(AppointmentStatus.class);
-    assertEquals(AppointmentStatus.AI_PENDING, unalteredStatus,
-        "An illegal state transition request must trigger a complete database rollback pass.");
+        .from(APPOINTMENTS).where(APPOINTMENTS.TICKET_CODE.eq(clashingTicketCode)).fetchOneInto(AppointmentStatus.class);
+    assertEquals(AppointmentStatus.AI_PENDING, unalteredStatus);
   }
 
   /**
-   * <h3>Test 3 (Absent Target Check): Verify behavior when trying to update a missing record</h3>
+   * <h3>Тест 3: Попытка мутации несуществующего кода билета в СУБД</h3>
    */
   @Test
   void shouldThrowIntegrityViolationExceptionWhenTargetRecordIsMissingFromDatabase() {
-    // Arrange: Explicitly leverage an unregistered metadata entity key
-    Long nonexistentId = 9999123L;
-
-    // Act & Assert: Call execution path targeting an empty slot row
+    // Act & Assert: Передаем незарегистрированный текстовый токен
     IntegrityViolationException exception = assertThrows(IntegrityViolationException.class, () ->
-        workflowService.approveAppointment(nonexistentId)
+        workflowService.approveAppointment("SB-ABSENT-TOKEN-999")
     );
 
-    assertTrue(exception.getMessage().contains("не найдена в базе данных"),
-        "The error output stream must clearly describe a target-missing operational vector.");
+    assertTrue(exception.getMessage().contains("не найдена в базе данных"));
   }
 
   /**
-   * <h3>Test 4 (Valid Cancellation Pass): Cancel an active AI draft session</h3>
-   *
-   * <p><b>Business Context:</b> A client cancels their request via the chatbot before the
-   * salon owner confirms it, or the owner declines the provisional booking via the dashboard [Strict Grounding].</p>
+   * <h3>Тест 4: Успешная отмена черновика записи визита (AI_PENDING -> CANCELED)</h3>
    */
   @Test
   void shouldSuccessfullyCancelAppointmentWhenInAiPendingStatus() {
-    // Arrange: Create a baseline AI draft ticket record
-    Long ticketId = 8888L;
+    String cancelTicketCode = "SB-20260813-CANCEL";
+
     dslCtx.insertInto(APPOINTMENTS)
-        .set(APPOINTMENTS.ID, ticketId)
+        .set(APPOINTMENTS.ID, 8888L)
+        .set(APPOINTMENTS.TICKET_CODE, cancelTicketCode)
         .set(APPOINTMENTS.CLIENT_ID, mockClientId)
         .set(APPOINTMENTS.MASTER_ID, mockMasterId)
         .set(APPOINTMENTS.SERVICE_ID, mockServiceId)
@@ -184,51 +171,41 @@ public class AppointmentWorkflowServiceIntegrationTest {
         .set(APPOINTMENTS.STATUS, AppointmentStatus.AI_PENDING)
         .execute();
 
-    // Act: Trigger the cancel action contract method
-    assertDoesNotThrow(() -> workflowService.cancelAppointment(ticketId),
-        "Cancelling a fresh provisional AI draft is completely valid.");
+    // Act
+    assertDoesNotThrow(() -> workflowService.cancelAppointment(cancelTicketCode));
 
-    // Assert: Verify state mutation on disk
+    // Assert
     AppointmentStatus identityStatus = dslCtx.select(APPOINTMENTS.STATUS)
-        .from(APPOINTMENTS).where(APPOINTMENTS.ID.eq(ticketId)).fetchOneInto(AppointmentStatus.class);
-    assertEquals(AppointmentStatus.CANCELED, identityStatus,
-        "The state store must transition cleanly to CANCELED status.");
+        .from(APPOINTMENTS).where(APPOINTMENTS.TICKET_CODE.eq(cancelTicketCode)).fetchOneInto(AppointmentStatus.class);
+    assertEquals(AppointmentStatus.CANCELED, identityStatus);
   }
 
   /**
-   * <h3>Test 5 (Terminal Rejection Guard): Prevent cancellation of already completed visits</h3>
-   *
-   * <p><b>Business Context:</b> A client was already successfully served, and the transaction is closed.
-   * The owner cannot accidentally trigger a cancel rule on a historical record [Strict Grounding].</p>
+   * <h3>Тест 5: Запрет отмены визита, который уже успешно завершен (COMPLETED -> CANCELED)</h3>
    */
   @Test
   void shouldThrowIntegrityViolationExceptionWhenAttemptingToCancelACompletedAppointment() {
-    // Arrange: Establish a closed terminal visit record
-    Long finishedTicketId = 9999L;
+    String immutableTicketCode = "SB-20260813-IMMUTABLE";
+
     dslCtx.insertInto(APPOINTMENTS)
-        .set(APPOINTMENTS.ID, finishedTicketId)
+        .set(APPOINTMENTS.ID, 9999L)
+        .set(APPOINTMENTS.TICKET_CODE, immutableTicketCode)
         .set(APPOINTMENTS.CLIENT_ID, mockClientId)
         .set(APPOINTMENTS.MASTER_ID, mockMasterId)
         .set(APPOINTMENTS.SERVICE_ID, mockServiceId)
-        .set(APPOINTMENTS.APPOINTMENT_TIME, LocalDateTime.now().minusDays(1)) // In the past
+        .set(APPOINTMENTS.APPOINTMENT_TIME, LocalDateTime.now().minusDays(1))
         .set(APPOINTMENTS.DURATION_MINUTES, 45)
         .set(APPOINTMENTS.PRICE, java.math.BigDecimal.valueOf(1500.00))
-        .set(APPOINTMENTS.STATUS, AppointmentStatus.COMPLETED) // Terminal State
+        .set(APPOINTMENTS.STATUS, AppointmentStatus.COMPLETED)
         .execute();
 
-    // Act & Assert: Verify that a state mutation attempt on a terminal row is caught and rolled back
-    IntegrityViolationException exception = assertThrows(IntegrityViolationException.class, () ->
-            workflowService.cancelAppointment(finishedTicketId),
-        "A closed COMPLETED transaction must be immutable to cancellation requests."
+    // Act & Assert
+    assertThrows(IntegrityViolationException.class, () ->
+        workflowService.cancelAppointment(immutableTicketCode)
     );
 
-    assertTrue(exception.getMessage().contains("Ошибка конечного автомата"),
-        "The error payload must declare a clear state machine validation clash exception.");
-
-    // Verify database state isolation remains untainted
     AppointmentStatus currentStatus = dslCtx.select(APPOINTMENTS.STATUS)
-        .from(APPOINTMENTS).where(APPOINTMENTS.ID.eq(finishedTicketId)).fetchOneInto(AppointmentStatus.class);
-    assertEquals(AppointmentStatus.COMPLETED, currentStatus,
-        "The database layer must enforce a strict rollback when a business transition constraint fails.");
+        .from(APPOINTMENTS).where(APPOINTMENTS.TICKET_CODE.eq(immutableTicketCode)).fetchOneInto(AppointmentStatus.class);
+    assertEquals(AppointmentStatus.COMPLETED, currentStatus);
   }
 }

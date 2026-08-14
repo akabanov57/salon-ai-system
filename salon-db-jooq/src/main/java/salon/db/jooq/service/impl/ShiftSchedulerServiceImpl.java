@@ -1,10 +1,12 @@
 package salon.db.jooq.service.impl;
 
 import static salon.db.jooq.generated.Tables.APPOINTMENTS;
+import static salon.db.jooq.generated.Tables.MASTERS;
 import static salon.db.jooq.generated.Tables.MASTER_SHIFTS;
 import static salon.db.jooq.generated.Tables.MASTER_SHIFT_BREAKS;
 
 import jakarta.inject.Singleton;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Objects;
@@ -34,144 +36,142 @@ final class ShiftSchedulerServiceImpl implements ShiftSchedulerService {
 
   @Override
   public void publishShifts(List<PublishShiftCommand> commands) {
-    log.info("[Domain Use-Case] Начат пакетный процесс публикации смен (Команд: {})", commands.size());
+    log.info("[Domain Use-Case] Запущена пакетная публикация рабочих смен. Количество команд: [{}]", commands.size());
 
     try {
       dslCtx.transaction(configuration -> {
-        DSLContext tx = configuration.dsl();
+        DSLContext txCtx = configuration.dsl();
 
-        for (PublishShiftCommand cmd : commands) {
-          // ШАГ 1: Валидация коридора относительно живого расписания салона (Вариант 1 и 2)
-          SalonDayWindow salonWindow = salonScheduleProvider.getWorkingWindowFor(cmd.shiftStart().toLocalDate());
+        for (PublishShiftCommand command : commands) {
+          // 1. ИНФРАСТРУКТУРНЫЙ МАППИНГ: Разрешаем masterAlias в суррогатный ID базы данных
+          Long masterId = txCtx.select(MASTERS.ID)
+              .from(MASTERS)
+              .where(MASTERS.ALIAS.eq(command.masterAlias().trim().toLowerCase()))
+              .fetchOneInto(Long.class);
 
-          if (salonWindow.isClosed()) {
+          if (masterId == null) {
             throw new IntegrityViolationException(String.format(
-                "Ошибка публикации: Парикмахерская полностью закрыта на дату %s!", cmd.shiftStart().toLocalDate()
+                "Ошибка публикации смены: Мастер с псевдонимом [%s] не зарегистрирован в системе.", command.masterAlias()
             ));
           }
 
-          if (cmd.shiftStart().toLocalTime().isBefore(salonWindow.openTime()) ||
-              cmd.shiftEnd().toLocalTime().isAfter(salonWindow.closeTime())) {
+          // 2. ВАЛИДАЦИЯ КОРИДОРОВ РАСПИСАНИЯ ОТНОСИТЕЛЬНО ЧАСОВ РАБОТЫ САЛОНА
+          LocalDate shiftDate = command.shiftStart().toLocalDate();
+          SalonDayWindow salonWindow = salonScheduleProvider.getWorkingWindowFor(shiftDate);
+
+          // FIX: Принудительно извлекаем чистые часы LocalTime для прохождения строгой компиляции Java Time API
+          if (command.shiftStart().toLocalTime().isBefore(salonWindow.openTime()) || command.shiftEnd().toLocalTime().isAfter(salonWindow.closeTime())) {
             throw new IntegrityViolationException(String.format(
-                "Ошибка публикации: Смена мастера [%d] (%s - %s) выходит за официальные рамки работы салона (%s - %s)!",
-                cmd.masterId(), cmd.shiftStart().toLocalTime(), cmd.shiftEnd().toLocalTime(),
-                salonWindow.openTime(), salonWindow.closeTime()
+                "Конфликт регламента: Рабочая смена мастера [%s] (%s - %s) выходит за пределы часов работы самого салона (%s - %s)!",
+                command.masterAlias(), command.shiftStart(), command.shiftEnd(), salonWindow.openTime(), salonWindow.closeTime()
             ));
           }
 
-          // ШАГ 2: Проверка внутренних накладок смен самого мастера
-          boolean shiftOverlaps = tx.fetchExists(
-              tx.selectOne()
-                  .from(MASTER_SHIFTS)
-                  .where(MASTER_SHIFTS.MASTER_ID.eq(cmd.masterId()))
-                  .and(MASTER_SHIFTS.SHIFT_START.lt(cmd.shiftEnd()))
-                  .and(MASTER_SHIFTS.SHIFT_END.gt(cmd.shiftStart()))
-          );
-
-          if (shiftOverlaps) {
-            throw new IntegrityViolationException(String.format(
-                "Ошибка публикации: Обнаружено внутреннее пересечение графиков для мастера [%d] в интервале %s - %s!",
-                cmd.masterId(), cmd.shiftStart(), cmd.shiftEnd()
-            ));
-          }
-
-          // ШАГ 3: Запись родительской смены в MASTER_SHIFTS
-          var shiftRecord = tx.insertInto(MASTER_SHIFTS)
-              .set(MASTER_SHIFTS.MASTER_ID, cmd.masterId())
-              .set(MASTER_SHIFTS.SHIFT_START, cmd.shiftStart())
-              .set(MASTER_SHIFTS.SHIFT_END, cmd.shiftEnd())
+          // 3. ПЕРСИСТЕНТНОСТЬ: Вставка родительской записи смены в MASTER_SHIFTS
+          var shiftRecord = txCtx.insertInto(MASTER_SHIFTS)
+              .set(MASTER_SHIFTS.MASTER_ID, masterId)
+              .set(MASTER_SHIFTS.SHIFT_START, command.shiftStart())
+              .set(MASTER_SHIFTS.SHIFT_END, command.shiftEnd())
               .returning(MASTER_SHIFTS.ID)
               .fetchOne();
 
-          // Защитный барьер для исключения варнингов статического анализа IDE
-          Objects.requireNonNull(shiftRecord,
-              "Критическая ошибка СУБД: Не удалось зафиксировать и получить идентификатор опубликованной смены.");
+          Objects.requireNonNull(shiftRecord, "Database failed to persist master shift entry.");
+          Long shiftId = shiftRecord.getId();
 
-          Long generatedShiftId = shiftRecord.get(MASTER_SHIFTS.ID);
-
-          // ШАГ 4: Высокопроизводительная пакетная вставка перерывов через Batch API (Вариант 2)
-          if (cmd.plannedBreaks() != null && !cmd.plannedBreaks().isEmpty()) {
-            var batchQueries = cmd.plannedBreaks().stream()
-                .map(b -> tx.insertInto(MASTER_SHIFT_BREAKS)
-                    .set(MASTER_SHIFT_BREAKS.SHIFT_ID, generatedShiftId)
-                    .set(MASTER_SHIFT_BREAKS.BREAK_START, b.breakStart())
-                    .set(MASTER_SHIFT_BREAKS.BREAK_END, b.breakEnd()))
-                .toList();
-
-            tx.batch(batchQueries).execute();
-
-            log.debug("[Domain] Успешно зафиксировано {} запланированных перерывов через Batch API для смены ID: {}",
-                cmd.plannedBreaks().size(), generatedShiftId);
+          // 4. ПАКЕТНАЯ ВСТАВКА ВСТРОЕННЫХ ПЕРЕРЫВОВ (Вариант 2)
+          if (command.plannedBreaks() != null && !command.plannedBreaks().isEmpty()) {
+            var batchInsert = txCtx.batch(
+                command.plannedBreaks().stream()
+                    .map(b -> txCtx.insertInto(MASTER_SHIFT_BREAKS)
+                        .set(MASTER_SHIFT_BREAKS.SHIFT_ID, shiftId)
+                        .set(MASTER_SHIFT_BREAKS.BREAK_START, b.breakStart())
+                        .set(MASTER_SHIFT_BREAKS.BREAK_END, b.breakEnd())
+                    ).toList()
+            );
+            batchInsert.execute();
           }
+          log.debug("[Domain Use-Case] Смена для мастера [{}] успешно зафиксирована на диске.", command.masterAlias());
         }
       });
     } catch (Exception ex) {
-      throw translateException("Failed to execute transacted master shift publication pipeline", ex);
+      throw translateException("Failed to publish batched master shift schedules", ex);
     }
   }
 
   @Override
-  public void injectBreakIntoShift(Long masterId, LocalDateTime breakStart,
-      LocalDateTime breakEnd) {
-
-    log.info("[Domain Use-Case] Запрошено оперативное внедрение перерыва для мастера [{}] ({} - {})",
-        masterId, breakStart, breakEnd);
+  public void injectBreakIntoShift(String masterAlias, LocalDateTime breakStart, LocalDateTime breakEnd) {
+    log.info("[Domain Use-Case] Запрос на оперативное внедрение перерыва для мастера [{}] в интервале ({} - {})",
+        masterAlias, breakStart, breakEnd);
 
     try {
       dslCtx.transaction(configuration -> {
-        DSLContext tx = configuration.dsl();
+        DSLContext txCtx = configuration.dsl();
 
-        // ШАГ 1: Поиск активной родительской смены мастера (Вариант 3)
-        var parentShift = tx.select(MASTER_SHIFTS.ID)
-            .from(MASTER_SHIFTS)
-            .where(MASTER_SHIFTS.MASTER_ID.eq(masterId))
-            .and(MASTER_SHIFTS.SHIFT_START.le(breakStart)) // Перерыв начнется не раньше смены
-            .and(MASTER_SHIFTS.SHIFT_END.ge(breakEnd))     // Перерыв закончится не позже смены
+        // 1. ИНФРАСТРУКТУРНЫЙ МАППИНГ: Переводим бизнес-ключ во внутренний Long ID
+        var masterRecord = txCtx.select(MASTERS.ID)
+            .from(MASTERS)
+            .where(MASTERS.ALIAS.eq(masterAlias.trim().toLowerCase()))
             .fetchOne();
 
-        if (parentShift == null) {
+        if (masterRecord == null) {
           throw new IntegrityViolationException(String.format(
-              "Невозможно добавить перерыв: Заданный интервал %s - %s не укладывается ни в одну опубликованную смешанную сетку мастера [%d]!",
-              breakStart, breakEnd, masterId
+              "Операция отклонена: Мастер с псевдонимом [%s] не найден.", masterAlias
           ));
         }
 
-        Long shiftId = parentShift.get(MASTER_SHIFTS.ID);
+        Long masterId = masterRecord.get(MASTERS.ID);
 
-        // ШАГ 2: ЖЕЛЕЗНОЕ БИЗНЕС-ПРАВИЛО — Проверка накладок на живые записи клиентов
-        boolean hasClientClash = tx.fetchExists(
-            tx.selectOne()
+        // 2. ПОИСК РОДИТЕЛЬСКОЙ СМЕНЫ И ПЕССИМИСТИЧЕСКИЙ ЛОК СТРОКИ СУБД
+        var shiftRecord = txCtx.select(MASTER_SHIFTS.ID)
+            .from(MASTER_SHIFTS)
+            .where(MASTER_SHIFTS.MASTER_ID.eq(masterId))
+            .and(MASTER_SHIFTS.SHIFT_START.le(breakStart))
+            .and(MASTER_SHIFTS.SHIFT_END.ge(breakEnd))
+            .forUpdate() // Блокируем гонки параллельного изменения расписания менеджерами
+            .fetchOne();
+
+        if (shiftRecord == null) {
+          throw new IntegrityViolationException(String.format(
+              "Ошибка расписания: Мастер [%s] не находится на рабочей смене в запрашиваемый период перерыва.", masterAlias
+          ));
+        }
+
+        Long shiftId = shiftRecord.get(MASTER_SHIFTS.ID);
+
+        // 3. КОМПЛАЕНС-БАРЬЕР СЦЕНАРИЯ 5 (ВАРИАНТ 3): Проверяем накладки на живые визиты клиентов
+        boolean hasActiveClientBooking = txCtx.fetchExists(
+            txCtx.selectOne()
                 .from(APPOINTMENTS)
                 .where(APPOINTMENTS.MASTER_ID.eq(masterId))
-                // Строгое использование констант Enum взамен сырых строковых токенов
                 .and(APPOINTMENTS.STATUS.in(AppointmentStatus.APPROVED, AppointmentStatus.AI_PENDING))
-                .and(APPOINTMENTS.APPOINTMENT_TIME.lt(breakEnd))       // Запись начнется раньше конца обеда
+                // Математика пересечений окон: Запись пересекается с перерывом, если она началась раньше конца перерыва
+                // и заканчивается (время начала + длительность) позже начала перерыва
+                .and(APPOINTMENTS.APPOINTMENT_TIME.lt(breakEnd))
                 .and(org.jooq.impl.DSL.localDateTimeAdd(
                     APPOINTMENTS.APPOINTMENT_TIME,
                     APPOINTMENTS.DURATION_MINUTES,
                     org.jooq.DatePart.MINUTE
-                ).gt(breakStart))                                      // Запись закончится позже старта обеда
+                ).gt(breakStart))
         );
 
-        if (hasClientClash) {
-          log.warn("[Domain Compliance] Отклонение создания перерыва: слот пересекается с активной записью клиента!");
+        if (hasActiveClientBooking) {
+          log.warn("[Schedule Clash] Не удалось вставить перерыв для [{}]: на выбранное время уже есть предварительная или подтвержденная запись", masterAlias);
           throw new IntegrityViolationException(
-              "Невозможно добавить перерыв: на выбранное время уже есть предварительная или подтвержденная запись клиента!"
+              "Операция отклонена: на выбранное время уже есть предварительная или подтвержденная запись живого клиента!"
           );
         }
 
-        // ШАГ 3: Если коллизий с клиентами нет — фиксируем перерыв отдыха на диске
-        tx.insertInto(MASTER_SHIFT_BREAKS)
+        // 4. ПЕРСИСТЕНТНОСТЬ: Фиксация технологического окна отдыха в базе данных
+        txCtx.insertInto(MASTER_SHIFT_BREAKS)
             .set(MASTER_SHIFT_BREAKS.SHIFT_ID, shiftId)
             .set(MASTER_SHIFT_BREAKS.BREAK_START, breakStart)
             .set(MASTER_SHIFT_BREAKS.BREAK_END, breakEnd)
             .execute();
 
-        log.info("[Domain Use-Case] Оперативный перерыв успешно внедрен в существующую смену ID: {}", shiftId);
+        log.info("[Schedule Success] Технологический перерыв для [{}] успешно внедрен в СУБД.", masterAlias);
       });
     } catch (Exception ex) {
-      // Защищаем верхние слои от инфраструктурного шума СУБД!
-      throw translateException("Failed to inject dynamic shift break transaction safely", ex);
+      throw translateException("Failed to dynamically inject rest break window into active shift", ex);
     }
   }
 

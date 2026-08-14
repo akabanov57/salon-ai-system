@@ -4,6 +4,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 import salon.api.model.Appointment;
+import salon.api.model.CatalogService;
 import salon.api.model.Master;
 import salon.api.model.ProcessMessageCommand;
 
@@ -20,21 +21,23 @@ public interface BookingService {
   void processMessage(ProcessMessageCommand command);
 
   /**
-   * Предварительное резервирование слота времени ИИ-ассистентом.
-   * Длительность вычисляется на сервере автоматически по идентификатору услуги.
+   * Предварительное резервирование временного слота ИИ-ассистентом.
    *
-   * @param clientId        Идентификатор клиента
-   * @param masterId        Идентификатор мастера
-   * @param serviceId       Идентификатор запрашиваемой услуги из каталога SERVICES
-   * @param appointmentTime Желаемое время начала сеанса
-   * @return Запись черновика визита, если время успешно заблокировано
+   * <p>Метод полностью скрывает существование автоинкрементных числовых ключей СУБД,
+   * оперируя исключительно строковыми бизнес-контекстами естественного языка.</p>
+   *
+   * @param platformId      Идентификатор мессенджера пользователя (chat_id)
+   * @param masterAlias     Уникальный текстовый псевдоним выбранного стилиста
+   * @param serviceName     Официальное наименование запрашиваемой процедуры
+   * @param appointmentTime Целевое время начала сеанса визита
+   * @return Доменный объект записи визита в статусе AI_PENDING в случае успешного бронирования
    */
-  Optional<Appointment> tryAiBooking(Long clientId, Long masterId, Long serviceId, LocalDateTime appointmentTime);
-
-  /**
-   * Сценарий для Владельца (Вашей жены): Одобрить запись из Vaadin GUI.
-   */
-  void approveAppointment(Long appointmentId);
+  Optional<Appointment> tryAiBooking(
+      String platformId,
+      String masterAlias,
+      String serviceName,
+      LocalDateTime appointmentTime
+  );
 
   /**
    * <h3>Бизнес-метод: Получение всех мастеров, работающих в выбранный день</h3>
@@ -47,4 +50,13 @@ public interface BookingService {
    * Вычисляет, находится ли мастер на рабочей смене и свободен ли запрашиваемый временной интервал.
    */
   boolean isMasterAvailableAt(Long masterId, Long serviceId, LocalDateTime time, int durationMinutes);
+
+  /**
+   * Выполняет поиск активных услуг в каталоге по текстовому совпадению.
+   * Используется ИИ-ассистентом для извлечения точных идентификаторов услуг.
+   *
+   * @param keyword Ключевое слово для полнотекстового или LIKE поиска
+   * @return Список найденных услуг, соответствующих критерию
+   */
+  List<CatalogService> searchServicesInCatalog(String keyword);
 }
