@@ -59,7 +59,7 @@ final class JooqConfigurationFactory implements AutoCloseable {
   }
 
   @Bean
-  public DataSource dataSource() {
+  DataSource dataSource() {
 
     // Читаем свойства через avaje-config API с дефолтными значениями
     final String url = Config.get("db.url", "jdbc:postgresql://localhost:5432/salon");
@@ -94,7 +94,7 @@ final class JooqConfigurationFactory implements AutoCloseable {
    *                   который мы настроим в главном модуле приложения)
    */
   @Bean
-  public DSLContext dslContext(DataSource dataSource) {
+  DSLContext dslContext(DataSource dataSource) {
 
     // Читаем диалект
     String dialectStr = Config.get("db.dialect", "POSTGRESQL");

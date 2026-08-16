@@ -7,7 +7,6 @@ import io.avaje.inject.Bean;
 import io.avaje.inject.Factory;
 import io.avaje.jex.Jex;
 import io.avaje.jex.Routing.HttpService;
-import io.avaje.jex.http.HttpFilter;
 import io.avaje.jex.ssl.SslPlugin;
 import io.avaje.jsonb.Jsonb;
 import java.io.File;
@@ -69,8 +68,9 @@ final class WebConfiguration {
 
             for (String root : potentialRoots) {
               if (root != null && !root.isBlank()) {
-                Path r1 = Paths.get(root).resolve(resolvedPath);
-                Path r2 = Paths.get(root).resolve("secret").resolve("salon-keystore.p12");
+                Path rootPath = Paths.get(root);
+                Path r1 = rootPath.resolve(resolvedPath);
+                Path r2 = rootPath.resolve("secret").resolve("salon-keystore.p12");
 
                 if (r1.toFile().exists() && r1.toFile().isFile()) {
                   finalPath = r1.toAbsolutePath().toString();
@@ -81,7 +81,7 @@ final class WebConfiguration {
                   break;
                 }
 
-                Path parentPath = Paths.get(root).getParent();
+                Path parentPath = rootPath.getParent();
                 if (parentPath != null) {
                   Path r3 = parentPath.resolve(resolvedPath);
                   if (r3.toFile().exists() && r3.toFile().isFile()) {
@@ -158,13 +158,13 @@ final class WebConfiguration {
    * avaje-inject гарантирует его безопасное закрытие на этапе остановки приложения.
    */
   @Bean
-  public HttpClient baseHttpClient(Jsonb jsonb) {
-    String baseTargetUrl = Config.get("telegram.api.baseUrl", "https://api.telegram.org");
-    boolean sslEnabled = Config.getBool("server.ssl.enabled", false);
+  HttpClient baseHttpClient(Jsonb jsonb) {
+    final String baseTargetUrl = Config.get("telegram.api.baseUrl", "https://api.telegram.org");
+    final boolean sslEnabled = Config.getBool("server.ssl.enabled", false);
 
     log.info("Инициализация исходящего шлюза Avaje HttpClient: {}", baseTargetUrl);
 
-    var builder = HttpClient.builder()
+    final var builder = HttpClient.builder()
         .baseUrl(baseTargetUrl)
         .bodyAdapter(new JsonbBodyAdapter(jsonb));
 

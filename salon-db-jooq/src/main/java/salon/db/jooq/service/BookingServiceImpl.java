@@ -160,7 +160,7 @@ final class BookingServiceImpl implements BookingService {
 
         // ШАГ 1: АТОМАРНЫЙ КРОСС-МАППИНГ СТРОК В ID ЗА ОДИН ПРОХОД
         // Извлекаем скрытые первичные ключи всех трех родительских таблиц одновременно, исключая паразитные JOIN-запросы
-        var ctxRecord = txCtx.select(
+        final var ctxRecord = txCtx.select(
                 CLIENTS.ID.as("SUB_CLIENT_ID"),
                 MASTERS.ID.as("SUB_MASTER_ID"),
                 SERVICES.ID.as("SUB_SERVICE_ID"),
@@ -181,15 +181,15 @@ final class BookingServiceImpl implements BookingService {
           return Optional.empty();
         }
 
-        Long surrogateClientId = ctxRecord.get("SUB_CLIENT_ID", Long.class);
-        Long surrogateMasterId = ctxRecord.get("SUB_MASTER_ID", Long.class);
-        Long surrogateServiceId = ctxRecord.get("SUB_SERVICE_ID", Long.class);
+        final Long surrogateClientId = ctxRecord.get("SUB_CLIENT_ID", Long.class);
+        final Long surrogateMasterId = ctxRecord.get("SUB_MASTER_ID", Long.class);
+        final Long surrogateServiceId = ctxRecord.get("SUB_SERVICE_ID", Long.class);
 
-        int durationMinutes = ctxRecord.get(SERVICES.DURATION_MINUTES);
-        BigDecimal historicalPrice = ctxRecord.get(SERVICES.PRICE);
+        final int durationMinutes = ctxRecord.get(SERVICES.DURATION_MINUTES);
+        final BigDecimal historicalPrice = ctxRecord.get(SERVICES.PRICE);
 
         // ШАГ 2: ЗАПУСК 4-ЭТАПНОГО КОМПЛАЕНС-ФИЛЬТРА ПО СКРЫТЫМ ID
-        boolean isAvailable = isMasterAvailableAtInternal(txCtx, surrogateMasterId, surrogateServiceId, appointmentTime, durationMinutes);
+        final boolean isAvailable = isMasterAvailableAtInternal(txCtx, surrogateMasterId, surrogateServiceId, appointmentTime, durationMinutes);
 
         if (!isAvailable) {
           log.warn("[Booking Aborted] Target slot criteria checks failed for master alias [{}] at time [{}]", masterAlias, appointmentTime);
@@ -197,10 +197,10 @@ final class BookingServiceImpl implements BookingService {
         }
 
         // ШАГ 3: ГЕНЕРАЦИЯ ПУБЛИЧНОГО БИЗНЕС-КОДА БИЛЕТА (Вариант А)
-        String generatedTicketCode = generateUniqueTicketCode(appointmentTime);
+        final String generatedTicketCode = generateUniqueTicketCode(appointmentTime);
 
         // ШАГ 4: АТОМАРНАЯ ЗАПИСЬ СЕССИИ В APPOINTMENTS С СОХРАНЕНИЕМ ИСТОРИЧЕСКИХ ДАННЫХ
-        var record = txCtx.insertInto(APPOINTMENTS)
+        final var record = txCtx.insertInto(APPOINTMENTS)
             .set(APPOINTMENTS.TICKET_CODE, generatedTicketCode)
             .set(APPOINTMENTS.CLIENT_ID, surrogateClientId)
             .set(APPOINTMENTS.MASTER_ID, surrogateMasterId)

@@ -44,7 +44,7 @@ final class AiAssistantServiceImpl implements AiAssistantService {
   // Сам доступ к СУБД (jOOQ DSLContext) инжектируется внутрь BookingTools,
   // которые LangChain4j использует как "руки" для похода в базу данных во время chat-сессии.
   @Inject
-  public AiAssistantServiceImpl(LowLevelAiService lowLevelAiService) {
+  AiAssistantServiceImpl(LowLevelAiService lowLevelAiService) {
     this.lowLevelAiService = lowLevelAiService;
   }
 

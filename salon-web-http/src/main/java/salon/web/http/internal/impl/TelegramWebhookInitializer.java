@@ -27,7 +27,7 @@ final class TelegramWebhookInitializer {
   private final String secretToken;
 
   TelegramWebhookInitializer(HttpClient baseHttpClient) {
-    String rawBotToken = Config.get("telegram.bot.token", "");
+    final String rawBotToken = Config.get("telegram.bot.token", "");
     this.urlTokenPrefix = "bot" + rawBotToken;
     this.publicUrl = Config.get("server.public.url", "");
     this.secretToken = Config.get("telegram.webhook.secret-token", "");
