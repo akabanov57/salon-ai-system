@@ -1,6 +1,8 @@
 package salon.ai.engine.service;
 
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
+import dev.langchain4j.service.MemoryId;
 import io.avaje.inject.External;
 import jakarta.inject.Singleton;
 import java.time.LocalDateTime;
@@ -56,7 +58,12 @@ final class BookingToolsImpl implements BookingTools {
 
   @Tool("Attempts to provisionally book a specific time slot for a client with a selected master for a specific service. Time format must be ISO local format: YYYY-MM-DDTHH:MM.")
   @Override
-  public String bookAppointmentSlot(String platformId, String masterAlias, String serviceName, String dateTimeStr) {
+  public String bookAppointmentSlot(
+      @P("The unique social account/messenger identifier of the active client (e.g., '12345678').") @MemoryId String platformId,
+      @P("The unique conversational alias string of the selected stylist (e.g., 'elena_colorist').") String masterAlias,
+      @P("The exact, official name of the requested procedure from the menu (e.g., 'Женская стрижка модельная').") String serviceName,
+      @P("The target appointment start date and time formatted strictly in ISO-8601 standard (e.g., '2026-08-25T14:30').") String dateTimeStr) {
+
     log.info("AI Tool Invocation: Attempting slot reservation using business keys for Client [{}], Master [{}] and Service [{}] at [{}]",
         platformId, masterAlias, serviceName, dateTimeStr);
 
@@ -80,7 +87,8 @@ final class BookingToolsImpl implements BookingTools {
 
   @Tool("Searches the official salon catalog for active services matching a descriptive keyword (e.g., 'haircut', 'coloring') to discover their exact official names.")
   @Override
-  public String searchServices(String searchKeyword) {
+  public String searchServices(
+      @P("The descriptive keyword to find matching services in the catalogue (e.g., 'стрижка').") String searchKeyword) {
     log.info("AI Tool: Processing service catalog query for keyword: [{}]", searchKeyword);
 
     try {

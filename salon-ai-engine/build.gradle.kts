@@ -33,7 +33,7 @@ dependencies {
 // =====================================================================
 tasks.named<JavaCompile>("compileJava") {
     options.compilerArgs.addAll(listOf(
-        "--add-reads", "salon.ai.engine=ALL-UNNAMED"
+        "--add-reads", "salon.ai.engine=ALL-UNNAMED", "-parameters"
     ))
 }
 

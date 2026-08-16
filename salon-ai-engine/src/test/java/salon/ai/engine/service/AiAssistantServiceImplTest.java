@@ -32,13 +32,17 @@ class AiAssistantServiceImplTest {
   private static BeanScope beanScope;
 
   // Объявляем замещение низкоуровневого ИИ-агента (LangChain4j) тестовым моком
-  private static final LowLevelAiService lowLevelAiServiceMock = Mockito.mock(LowLevelAiService.class);
-  private static final BookingService bookingServiceMock = Mockito.mock(BookingService.class);
+  private static LowLevelAiService lowLevelAiServiceMock;
+  private static BookingService bookingServiceMock;
 
   private AiAssistantService aiAssistantService;
 
   @BeforeAll
   static void startPipeline() {
+    // Чистая инициализация экземпляров перед сборкой контейнера зависимостей
+    lowLevelAiServiceMock = Mockito.mock(LowLevelAiService.class);
+    bookingServiceMock = Mockito.mock(BookingService.class);
+
     beanScope = BeanScope.builder()
         //.modules(new salon.ai.engine.EngineModule()) // Load the AI engine's generated module
         .beans(lowLevelAiServiceMock, bookingServiceMock) // Provide our mock definitions
@@ -54,20 +58,19 @@ class AiAssistantServiceImplTest {
 
   @BeforeEach
   void setUp() {
-      // Reset mocks to ensure total isolation between execution runs
-      Mockito.reset(lowLevelAiServiceMock, bookingServiceMock);
+    // Намёртво сбрасываем конфигурации вызовов моков перед каждым тест-кейсом
+    Mockito.reset(lowLevelAiServiceMock, bookingServiceMock);
 
-      // Extract the fully-wired interface bean from our custom test container
-      aiAssistantService = beanScope.get(AiAssistantService.class);
+    // Извлекаем протестированный синглтон из скомпилированного скоупа Avaje Inject
+    aiAssistantService = beanScope.get(AiAssistantService.class);
   }
 
   /**
-   * <p><b>ПРОВЕРЯЕМЫЕ ЦЕЛИ (Happy Path):</b>
-   * <ul>
-   *   <li>Убедиться, что сервис принимает доменную команду ProcessMessageCommand.</li>
-   *   <li>Проверить, что текстовый ответ от низкоуровневого агента возвращается без искажений.</li>
-   * </ul>
-   * </p>
+   * <h3>Тест 1: Успешный prompt-синтез ответа при отзывчивом ИИ-ядре (Happy Path)</h3>
+   * <p><b>Бизнес-контекст:</b> Пользователь отправляет сообщение в чат. Сервис обязан перенаправить
+   * его
+   * низкоуровневому агенту и вернуть текстовый ответ клиенту мессенджера без искажений [Strict
+   * Grounding].</p>
    */
   @Test
   void shouldSuccessfullyProcessChatWhenAiEngineIsResponsive() {
@@ -84,23 +87,25 @@ class AiAssistantServiceImplTest {
         "Хочу записаться к Елене на стрижку"
     );
 
-    assertNotNull(aiAssistantService, "DI-контейнер обязан успешно инициализировать AiAssistantService.");
+    assertNotNull(aiAssistantService,
+        "DI-контейнер обязан успешно инициализировать AiAssistantService.");
 
-    // Act
+    // Act: Прогоняем сквозной вызов через виртуальные потоки нашего оркестратора
     String actualResponse = aiAssistantService.processChat(command);
 
-    // Assert
-    assertEquals(sampleResponse, actualResponse, "Итоговый ответ должен в точности соответствовать сгенерированному ИИ тексту.");
+    // Assert: Верифицируем точность передачи аргументов и отсутствие текстовых искажений
+    assertEquals(sampleResponse, actualResponse,
+        "Итоговый ответ должен в точности соответствовать сгенерированному ИИ тексту.");
     verify(lowLevelAiServiceMock, times(1)).chat("12345678", "Хочу записаться к Елене на стрижку");
   }
 
   /**
-   * <p><b>ПРОВЕРЯЕМЫЕ ЦЕЛИ (Error Handling):</b>
-   * <ul>
-   *   <li>Проверить, что внутренние сбои LangChain4j перехватываются.</li>
-   *   <li>Гарантировать трансляцию технической ошибки в доменное исключение {@link AiEngineException}.</li>
-   * </ul>
-   * </p>
+   * <h3>Тест 2: Трансляция внутренних технических сбоев в доменные исключения (Error
+   * Handling)</h3>
+   * <p><b>Бизнес-контекст:</b> Если удаленный сервер Ollama недоступен или разорвал сетевое
+   * соединение,
+   * техническая ошибка должна быть перехвачена и превращена в безопасное доменное исключение
+   * AiEngineException [Strict Grounding].</p>
    */
   @Test
   void shouldThrowAiEngineExceptionWhenLowLevelAgentCrashes() {
@@ -116,10 +121,10 @@ class AiAssistantServiceImplTest {
         "Тестовый сбой"
     );
 
-    // Act & Assert
-    AiEngineException exception = assertThrows(AiEngineException.class, () -> {
-      aiAssistantService.processChat(command);
-    }, "При падении ИИ-движка сервис обязан выбросить специализированное исключение AiEngineException.");
+    // Act & Assert: Проверяем принудительное срабатывание барьера защиты
+    AiEngineException exception = assertThrows(AiEngineException.class,
+        () -> aiAssistantService.processChat(command),
+        "При падении ИИ-движка сервис обязан выбросить специализированное исключение AiEngineException.");
 
     assertTrue(exception.getMessage().contains("Внутренний сбой фабрики ИИ"),
         "Сообщение об ошибке должно содержать понятный доменный контекст.");
