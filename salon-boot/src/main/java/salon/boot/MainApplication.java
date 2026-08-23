@@ -5,6 +5,7 @@ import io.avaje.jex.Jex;
 import java.util.concurrent.CountDownLatch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import salon.api.service.TelegramWebhookInitializer;
 
 public class MainApplication {
 
@@ -24,7 +25,7 @@ public class MainApplication {
 
       Jex jex = scope.get(Jex.class);
       Jex.Server server = jex.start();
-      log.info("Микросервис успешно запущен на HTTPS порту и готов к работе.");
+      log.info("Микросервис успешно запущен и готов к работе.");
 
       Runtime.getRuntime().addShutdownHook(new Thread(() -> {
         log.info("Получен сигнал завершения работы ОС (SIGTERM). Запуск Graceful Shutdown...");
@@ -46,6 +47,11 @@ public class MainApplication {
           Thread.currentThread().interrupt();
         }
       }, "shutdown-hook-thread"));
+
+      // Вызов Способа Б: Контейнер создает новый временный инстанс Prototype-бина,
+      // выполняет метод и отпускает ссылку
+      final TelegramWebhookInitializer initializer = scope.get(TelegramWebhookInitializer.class);
+      initializer.registerWebhook();
 
       // Блокируем поток main, чтобы приложение не завершилось мгновенно
       latch.await();

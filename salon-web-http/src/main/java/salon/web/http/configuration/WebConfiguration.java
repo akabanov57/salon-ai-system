@@ -36,15 +36,19 @@ final class WebConfiguration {
    */
   @Bean
   Jex jex(List<HttpService> httpServices) {
-    int port = Config.getInt("server.port", 8443);
-    boolean sslEnabled = Config.getBool("server.ssl.enabled", false); // ЧИТАЕМ ФЛАГ ВКЛЮЧЕНИЯ SSL
+    final int port = Config.getInt("jex.port", 8443);
+    final boolean sslEnabled = Config.getBool("jex.ssl.enabled", false); // ЧИТАЕМ ФЛАГ ВКЛЮЧЕНИЯ SSL
+    final String host = Config.get("jex.host","[::]");
 
-    Jex jex = Jex.create().port(port);
+    Jex jex = Jex.create().config(jexConfig -> {
+      jexConfig.host(host);
+      jexConfig.port(port);
+    });
 
     // Настраиваем SSL только если свойство server.ssl.enabled=true
     if (sslEnabled) {
-      String resolvedPath = Config.get("server.ssl.keystorePath", "secret/salon-keystore.p12");
-      String resolvedPassword = Config.get("server.ssl.keystorePassword", "MySecurePassword123");
+      String resolvedPath = Config.get("jex.ssl.keystorePath", "certs/salon-keystore.p12");
+      String resolvedPassword = Config.get("jex.ssl.keystorePassword", "MySecurePassword123");
 
       var sslPlugin = SslPlugin.create(config -> {
         if (resolvedPath.startsWith("classpath:")) {
@@ -142,9 +146,6 @@ final class WebConfiguration {
       log.info("[SSL] Сервер Jex запускается по обычному протоколу HTTP (SSL отключен).");
     }
 
-    // Каждый сгенерированный метод @Filter из WebFilters теперь нативно встает в стек Jex!
-//    httpFilters.forEach(jex::filter);
-
     // Монтируем сгенерированные контроллеры маршрутов
     jex.routing(httpServices);
 
@@ -160,7 +161,7 @@ final class WebConfiguration {
   @Bean
   HttpClient baseHttpClient(Jsonb jsonb) {
     final String baseTargetUrl = Config.get("telegram.api.baseUrl", "https://api.telegram.org");
-    final boolean sslEnabled = Config.getBool("server.ssl.enabled", false);
+    final boolean sslEnabled = Config.getBool("jex.ssl.enabled", false);
 
     log.info("Инициализация исходящего шлюза Avaje HttpClient: {}", baseTargetUrl);
 

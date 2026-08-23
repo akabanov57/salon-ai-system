@@ -22,10 +22,6 @@ final class TelegramVerificationServiceImpl implements TelegramVerificationServi
 
   @Override
   public boolean isValidTelegramRequest(String headerToken) {
-    if (expectedToken.isBlank()) {
-      return true;
-    }
-
     if (headerToken == null || headerToken.isBlank()) {
       log.warn("Атака на вебхук: Обнаружен входящий запрос POST без обязательного секретного токена Telegram.");
       return false;

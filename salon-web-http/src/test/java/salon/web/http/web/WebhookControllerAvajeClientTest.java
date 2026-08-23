@@ -8,7 +8,9 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 
+import io.avaje.config.Config;
 import io.avaje.http.client.JsonbBodyAdapter;
 import io.avaje.inject.BeanScope;
 import io.avaje.jex.Jex;
@@ -16,6 +18,11 @@ import io.avaje.jex.Jex.Server;
 import io.avaje.http.client.HttpClient;
 import io.avaje.jsonb.Jsonb;
 import java.net.http.HttpResponse;
+import java.security.KeyManagementException;
+import java.security.NoSuchAlgorithmException;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -34,15 +41,13 @@ import salon.api.service.NotificationService;
 
 class WebhookControllerAvajeClientTest {
 
-  // Shared static references pinned once for the entire lifecycle footprint
-  private static final BookingService bookingServiceMock = Mockito.mock(BookingService.class);
-  private static final AiAssistantService aiAssistantServiceMock = Mockito.mock(
-      AiAssistantService.class);
-  private static final NotificationService notificationServiceMock = Mockito.mock(
-      NotificationService.class);
-  private static final MessageTraceService messageTraceServiceMock = Mockito.mock(
-      MessageTraceService.class);
-  private static final IdempotencyService idempotencyServiceMock = Mockito.mock(IdempotencyService.class);
+  private static BookingService bookingServiceMock;
+  private static AiAssistantService aiAssistantServiceMock;
+  private static NotificationService notificationServiceMock;
+  private static MessageTraceService messageTraceServiceMock;
+  private static IdempotencyService idempotencyServiceMock;
+
+  private static String telegramSecretToken;
 
   private static BeanScope beanScope;
   private static Server server;
@@ -50,6 +55,15 @@ class WebhookControllerAvajeClientTest {
 
   @BeforeAll
   static void startComponent() {
+    // FIX: Извлекаем секретный токен динамически из конфигурационного провайдера Avaje Config
+    telegramSecretToken = Config.get("telegram.webhook.secret-token");
+
+    // 1. Shared static references pinned once for the entire lifecycle footprint
+    bookingServiceMock = Mockito.mock(BookingService.class);
+    aiAssistantServiceMock = Mockito.mock(AiAssistantService.class);
+    notificationServiceMock = Mockito.mock(NotificationService.class);
+    messageTraceServiceMock = Mockito.mock(MessageTraceService.class);
+    idempotencyServiceMock = Mockito.mock(IdempotencyService.class);
 
     // 2. Билдим scope модуля. Наша WebRouterConfiguration автоматически запустится внутри билдера!
     beanScope = BeanScope.builder()
@@ -64,10 +78,44 @@ class WebhookControllerAvajeClientTest {
 
     // 4. Подключаем клиент к порту рантайма
     Jsonb jsonb = beanScope.get(Jsonb.class);
-    httpClient = HttpClient.builder()
-        .baseUrl("http://localhost:" + server.port())
-        .bodyAdapter(new JsonbBodyAdapter(jsonb))
-        .build();
+    httpClient = createDevClient(jex, server, jsonb);
+  }
+
+  private static HttpClient createDevClient(Jex jex, Server server, Jsonb jsonb) {
+    final String scheme = jex.config().scheme();
+    final String host = jex.config().host();
+    final int port = server.port();
+    if ("https".equals(scheme)) {
+      // Создаём менеджер, который принимает любые сертификаты без проверки
+      final TrustManager[] trustAllCerts = new TrustManager[]{
+          new X509TrustManager() {
+            public java.security.cert.X509Certificate[] getAcceptedIssuers() { return null; }
+            public void checkClientTrusted(java.security.cert.X509Certificate[] certs, String authType) {}
+            public void checkServerTrusted(java.security.cert.X509Certificate[] certs, String authType) {}
+          }
+      };
+
+      final SSLContext sslContext;
+      try {
+        sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
+      } catch (NoSuchAlgorithmException | KeyManagementException e) {
+        throw new RuntimeException(e);
+      }
+
+      return HttpClient.builder()
+          .baseUrl(scheme + "://" + host + ":" + port)
+          .bodyAdapter(new JsonbBodyAdapter(jsonb))
+          .sslContext(sslContext)
+          .build();
+    } else if ("http".equals(scheme)) {
+      return HttpClient.builder()
+          .baseUrl(scheme + "://" + host + ":" + port)
+          .bodyAdapter(new JsonbBodyAdapter(jsonb))
+          .build();
+    } else {
+      throw new RuntimeException("Unknown scheme.");
+    }
   }
 
   @AfterEach
@@ -119,6 +167,8 @@ class WebhookControllerAvajeClientTest {
 
     // Act: Выполняем реальный сетевой вызов по унифицированному эндпоинту
     HttpResponse<String> response = httpClient.request()
+        // FIX: Передаем динамически считанный секретный токен для проверки подлинности шлюза
+        .header("X-Telegram-Bot-Api-Secret-Token", telegramSecretToken)
         .path("api/v1/webhooks/telegram") // FIX: Приведено к единому стандарту 'webhook' (в единственном числе)
         .body(genuineTelegramUpdate)    // Автоматическая маршализация JSON через встроенный Jsonb
         .POST()
@@ -173,6 +223,7 @@ class WebhookControllerAvajeClientTest {
 
     // Act: Выполняем реальный сетевой вызов (без ведущего слэша, как требует ваш avaje httpClient!)
     HttpResponse<String> response = httpClient.request()
+        .header("X-Telegram-Bot-Api-Secret-Token", telegramSecretToken)
         .path("api/v1/webhooks/telegram")
         .body(duplicateTelegramUpdate)
         .POST()
@@ -236,6 +287,7 @@ class WebhookControllerAvajeClientTest {
 
     // Act: Выполняем реальный сетевой вызов. Путь приведен к константе webhooks во множественном числе
     HttpResponse<String> response = httpClient.request()
+        .header("X-Telegram-Bot-Api-Secret-Token", telegramSecretToken)
         .path("api/v1/webhooks/telegram") // FIX: Приведено к верному эндпоинту 'webhooks'
         .body(genuineTelegramJsonPayload)
         .POST()
@@ -298,7 +350,7 @@ class WebhookControllerAvajeClientTest {
         .when(idempotencyServiceMock)
         .tryAcquireLock(eq(PlatformType.TELEGRAM), eq(String.valueOf(mockUpdateId)));
 
-    // СОБИРАЕМ ВЛИДНЫЙ СЕТЕВОЙ ПАКЕТ TELEGRAM
+    // СОБИРАЕМ ВАЛИДНЫЙ СЕТЕВОЙ ПАКЕТ TELEGRAM
     TelegramUpdateDto genuineTelegramUpdate = new TelegramUpdateDto(
         mockUpdateId,
         new TelegramUpdateDto.MessageContent(
@@ -311,6 +363,7 @@ class WebhookControllerAvajeClientTest {
 
     // Act: Выполняем реальный сетевой вызов к нашему конвейеру фильтров Jex
     HttpResponse<String> response = httpClient.request()
+        .header("X-Telegram-Bot-Api-Secret-Token", telegramSecretToken)
         .path("api/v1/webhooks/telegram")
         .body(genuineTelegramUpdate)
         .POST()
@@ -327,5 +380,20 @@ class WebhookControllerAvajeClientTest {
 
     // 3. ЖЕЛЕЗНЫЙ UX: Верифицируем, что клиенту улетело вежливое экстренное сообщение в чат мессенджера
     verify(notificationServiceMock, times(1)).sendResponse(expectedPlatformId, emergencyMessage);
+  }
+
+  @Test
+  void shouldRejectWebhookRequestWhenSecretTokenIsInvalid() {
+    String telegramUpdateJson = "{ \"message\": { \"text\": \"Запрос\" } }";
+
+    HttpResponse<String> response = httpClient.request()
+        .header("X-Telegram-Bot-Api-Secret-Token", "WRONG_SECRET_TOKEN")
+        .path("api/v1/webhooks/telegram")
+        .body(telegramUpdateJson)
+        .POST()
+        .asString();
+
+    assertEquals(401, response.statusCode());
+    verifyNoInteractions(bookingServiceMock, aiAssistantServiceMock);
   }
 }

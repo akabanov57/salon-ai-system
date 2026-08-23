@@ -25,3 +25,5 @@ include("salon-ai-engine")
 include("salon-app-vaadin")
 include("salon-web-http")
 include("salon-boot")
+
+include("salon-e2e-test")
