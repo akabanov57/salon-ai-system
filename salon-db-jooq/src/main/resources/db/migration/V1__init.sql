@@ -88,10 +88,10 @@ CREATE INDEX IDX_MASTER_SHIFT_BREAKS_LOOKUP ON MASTER_SHIFT_BREAKS (SHIFT_ID, BR
 CREATE TABLE SERVICES
 (
     ID               BIGSERIAL PRIMARY KEY,
-    NAME             VARCHAR(128) NOT NULL, -- Официальное наименование (уникальный бизнес-ключ)
-    DURATION_MINUTES INT          NOT NULL, -- Объективное нормативное время услуги
-    PRICE            NUMERIC(10,2) NOT NULL,
-    CREATED_AT       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    NAME             VARCHAR(128)   NOT NULL, -- Официальное наименование (уникальный бизнес-ключ)
+    DURATION_MINUTES INT            NOT NULL, -- Объективное нормативное время услуги
+    PRICE            NUMERIC(10, 2) NOT NULL,
+    CREATED_AT       TIMESTAMP      NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT UQ_SERVICE_NAME UNIQUE (NAME),
     CONSTRAINT CHK_SERVICE_DURATION_MUST_BE_POSITIVE CHECK (DURATION_MINUTES > 0),
@@ -135,16 +135,16 @@ CREATE INDEX IDX_MASTER_SERVICES_LOOKUP ON MASTER_SERVICES (MASTER_ID, SERVICE_I
 -- =====================================================================
 CREATE TABLE APPOINTMENTS
 (
-    ID               BIGSERIAL PRIMARY KEY, -- Внутренний суррогатный ключ для персистентного слоя и быстрых связей в СУБД
-    TICKET_CODE      VARCHAR(32)   NOT NULL, -- Уникальный публичный бизнес-код записи визита (например, 'SB-20260813-A7X')
-    CLIENT_ID        BIGINT      NOT NULL, -- Скрытый внешний ключ связи с родителем в таблице CLIENTS
-    MASTER_ID        BIGINT      NOT NULL, -- Скрытый внешний ключ связи с родителем в таблице MASTERS
-    SERVICE_ID       BIGINT      NOT NULL, -- FIX: Прямая жесткая привязка к каталогу услуг
-    APPOINTMENT_TIME TIMESTAMP   NOT NULL, -- Дата и точное время начала сеанса визита
-    DURATION_MINUTES INT         NOT NULL, -- Копируется из SERVICES для стабильности исторического аудита
-    PRICE            NUMERIC(10,2) NOT NULL, -- FIX: Фиксация исторической стоимости на дату записи
-    STATUS           VARCHAR(32) NOT NULL, -- 'AI_PENDING', 'APPROVED', 'CANCELED'
-    CREATED_AT       TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ID               BIGSERIAL PRIMARY KEY,   -- Внутренний суррогатный ключ для персистентного слоя и быстрых связей в СУБД
+    TICKET_CODE      VARCHAR(32)    NOT NULL, -- Уникальный публичный бизнес-код записи визита (например, 'SB-20260813-A7X')
+    CLIENT_ID        BIGINT         NOT NULL, -- Скрытый внешний ключ связи с родителем в таблице CLIENTS
+    MASTER_ID        BIGINT         NOT NULL, -- Скрытый внешний ключ связи с родителем в таблице MASTERS
+    SERVICE_ID       BIGINT         NOT NULL, -- FIX: Прямая жесткая привязка к каталогу услуг
+    APPOINTMENT_TIME TIMESTAMP      NOT NULL, -- Дата и точное время начала сеанса визита
+    DURATION_MINUTES INT            NOT NULL, -- Копируется из SERVICES для стабильности исторического аудита
+    PRICE            NUMERIC(10, 2) NOT NULL, -- FIX: Фиксация исторической стоимости на дату записи
+    STATUS           VARCHAR(32)    NOT NULL, -- 'AI_PENDING', 'APPROVED', 'CANCELED'
+    CREATED_AT       TIMESTAMP      NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     -- Ограничение уникальности публичного бизнес-кода билета визита
     CONSTRAINT UQ_APPOINTMENT_TICKET_CODE
@@ -197,9 +197,9 @@ CREATE INDEX IDX_MSG_TRACES_TRACE_ID ON MESSAGE_TRACES (TRACE_ID);
 -- =====================================================================
 CREATE TABLE INBOUND_EVENTS
 (
-    PLATFORM_TYPE         VARCHAR(32)  NOT NULL, -- 'TELEGRAM', 'INSTAGRAM'
-    MESSENGER_MESSAGE_ID  VARCHAR(128) NOT NULL, -- Натуральный ID сообщения от платформы
-    CREATED_AT            TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PLATFORM_TYPE        VARCHAR(32)  NOT NULL, -- 'TELEGRAM', 'INSTAGRAM'
+    MESSENGER_MESSAGE_ID VARCHAR(128) NOT NULL, -- Натуральный ID сообщения от платформы
+    CREATED_AT           TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     -- Естественный составной первичный ключ обеспечивает максимальную скорость проверки
     CONSTRAINT PK_INBOUND_EVENTS PRIMARY KEY (PLATFORM_TYPE, MESSENGER_MESSAGE_ID)
@@ -228,11 +228,11 @@ CREATE INDEX IDX_INBOUND_EVENTS_LOOKUP ON INBOUND_EVENTS (PLATFORM_TYPE, MESSENG
 -- 7.1. БАЗОВЫЙ ЦИКЛИЧЕСКИЙ ШАБЛОН РАБОТЫ ПО ДНЯМ НЕДЕЛИ
 CREATE TABLE SALON_WEEKLY_SCHEDULE
 (
-    DAY_OF_WEEK   VARCHAR(16) PRIMARY KEY, -- 'MONDAY', 'TUESDAY', ... 'SUNDAY'
-    IS_CLOSED     BOOLEAN     NOT NULL DEFAULT FALSE,
-    OPEN_TIME     TIME        NOT NULL DEFAULT '09:00:00',
-    CLOSE_TIME    TIME        NOT NULL DEFAULT '20:00:00',
-    CREATED_AT    TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    DAY_OF_WEEK VARCHAR(16) PRIMARY KEY, -- 'MONDAY', 'TUESDAY', ... 'SUNDAY'
+    IS_CLOSED   BOOLEAN   NOT NULL DEFAULT FALSE,
+    OPEN_TIME   TIME      NOT NULL DEFAULT '09:00:00',
+    CLOSE_TIME  TIME      NOT NULL DEFAULT '20:00:00',
+    CREATED_AT  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     -- Гарантируем валидность временного интервала на уровне ядра СУБД
     CONSTRAINT CHK_SALON_WEEKLY_CHRONOLOGY CHECK (IS_CLOSED = TRUE OR CLOSE_TIME > OPEN_TIME)
@@ -241,7 +241,7 @@ CREATE TABLE SALON_WEEKLY_SCHEDULE
 -- 7.2. ДИНАМИЧЕСКИЕ КАЛЕНДАРНЫЕ ИСКЛЮЧЕНИЯ (ПРАЗДНИКИ, ПЕРЕНОСЫ, МУТАЦИИ ГРАФИКА)
 CREATE TABLE SALON_CALENDAR_EXCEPTIONS
 (
-    CALENDAR_DATE DATE      PRIMARY KEY, -- Например, '2026-12-31'. Конкретная дата исключения.
+    CALENDAR_DATE DATE PRIMARY KEY, -- Например, '2026-12-31'. Конкретная дата исключения.
     IS_CLOSED     BOOLEAN   NOT NULL DEFAULT FALSE,
     OPEN_TIME     TIME,
     CLOSE_TIME    TIME,
@@ -250,3 +250,30 @@ CREATE TABLE SALON_CALENDAR_EXCEPTIONS
     -- Гарантируем валидность временного интервала исключения на уровне ядра СУБД
     CONSTRAINT CHK_SALON_EXCEPTION_CHRONOLOGY CHECK (IS_CLOSED = TRUE OR CLOSE_TIME > OPEN_TIME)
 );
+-- ============================================
+-- ТАБЛИЦА AI_CONVERSATIONAL_CONTEXTS
+-- ============================================
+-- где под каждого клиента выделена ровно одна строка, обновляемая
+-- по принципу Upsert (ON DUPLICATE KEY UPDATE).
+--
+-- Зачем: Чтобы избежать повторного полного парсинга всей текстовой истории сообщений из
+-- таблицы MESSAGE_TRACES при каждом новом ответе пользователя.
+-- Попытка восстанавливать состояние стейт-машины из сырого текста логов ресурсоемка
+-- (требует огромного окна контекста LLM) и непредсказуема (модель может «галлюцинировать»
+-- и забывать старые слоты).
+-- Хранение структуры слотов в виде единого текстового JSON-поля (TEXT) вместо плоских
+-- колонок обусловлено Фазой 1: требования бизнеса меняются еженедельно. Если завтра
+-- добавятся новые слоты (например, client_phone или promo_code), вам не придется писать
+-- SQL-миграции Flyway/Liquibase и перегенерировать метамодель jOOQ — достаточно будет
+-- просто расширить Java Record.
+CREATE TABLE AI_CONVERSATIONAL_CONTEXTS
+(
+    CLIENT_ID BIGINT PRIMARY KEY, -- Связь 1:1 с таблицей CLIENTS (chat_id / platformId)
+    CURRENT_STATE VARCHAR (32) NOT NULL DEFAULT 'INIT',
+    SERIALIZED_SLOTS TEXT NOT NULL, -- Иммутабельный JSON-пакет слотов (avaje-jsonb)
+    UPDATED_AT TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT FK_CONTEXT_BELONGS_TO_CLIENT FOREIGN KEY (CLIENT_ID)
+    REFERENCES CLIENTS (ID) ON DELETE CASCADE
+);
+
+CREATE INDEX IX_AI_CONTEXT_UPDATED_AT ON AI_CONVERSATIONAL_CONTEXTS (UPDATED_AT);

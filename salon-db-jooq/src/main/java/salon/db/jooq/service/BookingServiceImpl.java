@@ -15,7 +15,9 @@ import io.avaje.validation.constraints.Valid;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Objects;
@@ -23,6 +25,8 @@ import java.util.Optional;
 import java.util.UUID;
 import org.jooq.DSLContext;
 import org.jooq.DatePart;
+import org.jooq.exception.DataAccessException;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import salon.api.exception.IntegrityViolationException;
@@ -120,7 +124,7 @@ final class BookingServiceImpl implements BookingService {
 
   @Override
   public void processMessage(@Valid ProcessMessageCommand command) {
-    log.info("[Domain Use-Case] Начат цикл обработки обращения для платформы {} (ID: {})",
+    log.debug("[Domain Use-Case] Начат цикл обработки обращения для платформы {} (ID: {})",
         command.platformType(), command.platformId());
 
     try {
@@ -140,7 +144,8 @@ final class BookingServiceImpl implements BookingService {
             .set(MESSAGE_TRACES.CLIENT_ID, surrogateClientId) // Чистый внутренний ключ связывания без утечки наружу
             .execute();
 
-        log.debug("[Domain Use-Case] Входящий лог транзакции {} успешно сохранен.", command.traceId());
+        log.debug("[Domain Use-Case] Входящий лог транзакции {} успешно сохранен.",
+            command.traceId());
       });
     } catch (Exception ex) {
       throw translateException("Failed to identify or create multi-channel client profile", ex);
@@ -151,14 +156,15 @@ final class BookingServiceImpl implements BookingService {
   public Optional<Appointment> tryAiBooking(String platformId, String masterAlias,
       String serviceName, LocalDateTime appointmentTime) {
 
-    log.info("[Persistence Layer] Initiating natural key transacted allocation for Client[{}], Master[{}], Service[{}]",
+    log.debug(
+        "[Persistence Layer] Initiating natural key transacted allocation for Client[{}], Master[{}], Service[{}]",
         platformId, masterAlias, serviceName);
 
     try {
       return dslCtx.transactionResult(configuration -> {
         DSLContext txCtx = configuration.dsl();
 
-        // ШАГ 1: АТОМАРНЫЙ КРОСС-МАППИНГ СТРОК В ID ЗА ОДИН ПРОХОД
+        // ШАГ 1: АТОМАРНЫЙ КРОСС-МАППИНГ СТРОК В ID ЗА ОДИН ПРОХОД.
         // Извлекаем скрытые первичные ключи всех трех родительских таблиц одновременно, исключая паразитные JOIN-запросы
         final var ctxRecord = txCtx.select(
                 CLIENTS.ID.as("SUB_CLIENT_ID"),
@@ -270,8 +276,10 @@ final class BookingServiceImpl implements BookingService {
    * ПРИВАТНЫЙ ХЕЛПЕР СЛОЯ ПЕРСИСТЕНТНОСТИ: Выполняет проверку внутри заданной транзакции.
    * Полностью инкапсулирует детали jOOQ (DSLContext) внутри модуля БД.
    */
+  @SuppressWarnings("GrazieStyle")
   private boolean isMasterAvailableAtInternal(DSLContext txCtx, Long masterId, Long serviceId, LocalDateTime time, int durationMinutes) {
-    log.debug("Business Step: Computing isolated availability check for master [{}] at [{}] with a {}-min buffer",
+    log.debug(
+        "Business Step: Computing isolated availability check for master [{}] at [{}] with a {}-min buffer",
         masterId, time, SANITARY_BUFFER_MINUTES);
 
     // =====================================================================
@@ -280,7 +288,7 @@ final class BookingServiceImpl implements BookingService {
     // MASTER_SERVICES Matrix:  [MASTER_ID: 1, SERVICE_ID: 55] (Окрашивание) -> ALLOWED (True)
     // Requested Target:        [MASTER_ID: 1, SERVICE_ID: 99] (Маникюр)     -> REJECTED (False)
     // =====================================================================
-    boolean hasCompetence = txCtx.fetchExists(
+    final boolean hasCompetence = txCtx.fetchExists(
         txCtx.selectOne()
             .from(MASTER_SERVICES)
             .where(MASTER_SERVICES.MASTER_ID.eq(masterId))
@@ -293,9 +301,9 @@ final class BookingServiceImpl implements BookingService {
     }
 
     // Фактическое время окончания самой процедуры клиента
-    LocalDateTime baseEndTime = time.plusMinutes(durationMinutes);
+    final LocalDateTime baseEndTime = time.plusMinutes(durationMinutes);
     // Время освобождения рабочего места с учетом санитарного перерыва
-    LocalDateTime endTimeWithBuffer = time.plusMinutes(durationMinutes + SANITARY_BUFFER_MINUTES);
+    final LocalDateTime endTimeWithBuffer = time.plusMinutes(durationMinutes + SANITARY_BUFFER_MINUTES);
 
     // =====================================================================
     // ЭТАП А: Проверка коридора рабочей смены и пессимистический лок
@@ -307,7 +315,7 @@ final class BookingServiceImpl implements BookingService {
     // ВАЖНО: Сама процедура (baseEndTime) обязана полностью укладываться в смену.
     // Санитарный буфер уборки места (endTimeWithBuffer) может легитимно выходить за рамки смены.
     // =====================================================================
-    var shiftRecord = txCtx.select(MASTER_SHIFTS.ID)
+    final var shiftRecord = txCtx.select(MASTER_SHIFTS.ID)
         .from(MASTER_SHIFTS)
         .where(MASTER_SHIFTS.MASTER_ID.eq(masterId))
         .and(MASTER_SHIFTS.SHIFT_START.le(time))
@@ -319,7 +327,7 @@ final class BookingServiceImpl implements BookingService {
       return false;
     }
 
-    Long shiftId = shiftRecord.get(MASTER_SHIFTS.ID);
+    final Long shiftId = shiftRecord.get(MASTER_SHIFTS.ID);
 
     // =====================================================================
     // ЭТАП Б: Проверка накладок на существующие визиты с учетом буфера
@@ -330,7 +338,7 @@ final class BookingServiceImpl implements BookingService {
     // New App Clash C:         [time]────────────────────────────────────────[endTimeWithBuffer] ==> CLASH (False)
     // New App Safe Slot:                                                         [time]───────── ==> ALLOWED (True)
     // =====================================================================
-    boolean hasClash = txCtx.fetchExists(
+    final boolean hasClash = txCtx.fetchExists(
         txCtx.selectOne()
             .from(APPOINTMENTS)
             .where(APPOINTMENTS.MASTER_ID.eq(masterId))
@@ -360,7 +368,7 @@ final class BookingServiceImpl implements BookingService {
     //
     // ВАЖНО: Запись клиента не имеет права пересекаться с окнами отдыха мастера.
     // =====================================================================
-    boolean hitsBreak = txCtx.fetchExists(
+    final boolean hitsBreak = txCtx.fetchExists(
         txCtx.selectOne()
             .from(MASTER_SHIFT_BREAKS)
             .where(MASTER_SHIFT_BREAKS.SHIFT_ID.eq(shiftId))
@@ -387,7 +395,9 @@ final class BookingServiceImpl implements BookingService {
 
   @Override
   public List<CatalogService> searchServicesInCatalog(String keyword) {
-    log.debug("[Persistence Layer] Executing text-search matching filter inside services catalog for: [{}]", keyword);
+    log.debug(
+        "[Persistence Layer] Executing text-search matching filter inside services catalog for: [{}]",
+        keyword);
 
     try {
       String pattern = "%" + keyword.trim().toUpperCase() + "%";
@@ -405,6 +415,82 @@ final class BookingServiceImpl implements BookingService {
           .toList();
     } catch (Exception ex) {
       throw translateException("Failed to query database services catalogue by keyword", ex);
+    }
+  }
+
+  @Override
+  public List<Master> getAvailableMastersForServiceInterval(
+      String serviceName,
+      LocalDate date,
+      LocalTime timeFrom,
+      LocalTime timeTo
+  ) {
+    log.debug("Запуск аналитического подбора мастеров для услуги '{}' на дату {} в интервале {}-{}",
+        serviceName, date, timeFrom, timeTo);
+
+    // Защитный заслон: Валидация входных параметров (Preconditions)
+    if (serviceName == null || serviceName.isBlank()) {
+      throw new IllegalArgumentException("Наименование услуги для подбора мастеров не может быть пустым.");
+    }
+    Objects.requireNonNull(date, "Целевая дата визита не может быть null.");
+    Objects.requireNonNull(timeFrom, "Нижняя граница времени (timeFrom) не может быть null.");
+    Objects.requireNonNull(timeTo, "Верхняя граница времени (timeTo) не может быть null.");
+
+    if (!timeTo.isAfter(timeFrom)) {
+      throw new IllegalArgumentException(String.format(
+          "Некорректный интервал времени: верхняя граница (%s) должна быть строго позже нижней (%s).", timeTo, timeFrom));
+    }
+
+    final LocalDateTime windowStart = LocalDateTime.of(date, timeFrom);
+    final LocalDateTime windowEnd = LocalDateTime.of(date, timeTo);
+
+    try {
+      // Выбираем только те поля, которые необходимы для конструирования рекорда Master
+      return dslCtx.select(MASTERS.ALIAS, MASTERS.FIRST_NAME, MASTERS.LAST_NAME,
+              MASTERS.SPECIALIZATION)
+          .from(MASTERS)
+          .join(MASTER_SERVICES).on(MASTER_SERVICES.MASTER_ID.eq(MASTERS.ID))
+          .join(SERVICES).on(SERVICES.ID.eq(MASTER_SERVICES.SERVICE_ID))
+          .join(MASTER_SHIFTS).on(MASTER_SHIFTS.MASTER_ID.eq(MASTERS.ID))
+          .where(SERVICES.NAME.likeIgnoreCase("%" + serviceName + "%"))
+          .and(MASTER_SHIFTS.SHIFT_START.le(windowStart))
+          .and(MASTER_SHIFTS.SHIFT_END.ge(windowEnd))
+          .and(DSL.exists(
+              dslCtx.selectOne().where(
+                  DSL.notExists(
+                          dslCtx.selectOne()
+                              .from(MASTER_SHIFT_BREAKS)
+                              .where(MASTER_SHIFT_BREAKS.SHIFT_ID.eq(MASTER_SHIFTS.ID))
+                              .and(MASTER_SHIFT_BREAKS.BREAK_START.lt(windowEnd))
+                              .and(MASTER_SHIFT_BREAKS.BREAK_END.gt(windowStart))
+                      )
+                      .and(DSL.notExists(
+                          dslCtx.selectOne()
+                              .from(APPOINTMENTS)
+                              .where(APPOINTMENTS.MASTER_ID.eq(MASTERS.ID))
+                              .and(APPOINTMENTS.STATUS.in(AppointmentStatus.APPROVED,
+                                  AppointmentStatus.AI_PENDING))
+                              .and(APPOINTMENTS.APPOINTMENT_TIME.lt(windowEnd))
+                              .and(APPOINTMENTS.APPOINTMENT_TIME.add(
+                                  APPOINTMENTS.DURATION_MINUTES.mul(60)).gt(windowStart))
+                      ))
+              )
+          ))
+          // ИСПРАВЛЕНО: Маппинг полей jOOQ Record напрямую в ваш Java Record Master
+          .fetch(record -> new Master(
+              record.get(MASTERS.ALIAS),
+              record.get(MASTERS.FIRST_NAME),
+              record.get(MASTERS.LAST_NAME),
+              record.get(MASTERS.SPECIALIZATION)
+          ));
+    } catch (DataAccessException e) {
+      // Надежно логируем инфраструктурный сбой с контекстом запроса для быстрой отладки
+      log.error("Критический сбой СУБД при подборе квалифицированных мастеров для услуги '{}' в интервале {}-{}",
+          serviceName, windowStart, windowEnd, e);
+
+      // Маппим техническую ошибку jOOQ в контролируемое доменное исключение хранения
+      throw new StorageInfrastructureException(
+          "Не удалось выполнить подбор доступных специалистов из-за внутренней ошибки слоя хранения", e);
     }
   }
 

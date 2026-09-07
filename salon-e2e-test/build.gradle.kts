@@ -33,6 +33,9 @@ dependencies {
     // в зависимостях нет, то будут использоваться установки по умолчанию.
     runtimeOnly(libs.avaje.jsonb.inject.plugin)
 
+    // Добавляем в слой данных для чтения проперти
+    testImplementation(libs.avaje.config)
+
     // Compile-time Dependency Injection container
     testImplementation(libs.avaje.inject)
     annotationProcessor(libs.avaje.inject.generator)

@@ -13,6 +13,7 @@ import java.io.File;
 import java.net.URI;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -166,6 +167,7 @@ final class WebConfiguration {
     log.info("Инициализация исходящего шлюза Avaje HttpClient: {}", baseTargetUrl);
 
     final var builder = HttpClient.builder()
+        .requestTimeout(Duration.ofMinutes(4))
         .baseUrl(baseTargetUrl)
         .bodyAdapter(new JsonbBodyAdapter(jsonb));
 

@@ -37,7 +37,7 @@ final class BookingToolsImpl implements BookingTools {
     this.bookingService = bookingService;
   }
 
-  @Tool("Retrieves a complete list of all active hair stylists, beauty masters, and colorists along with their specialties and unique conversational ALIAS strings.")
+  @Tool("Получить полный список всех действующих парикмахеров, мастеров красоты и колористов, а также их специализации и уникальные диалоговые псевдонимы.")
   @Override
   public String getAvailableStylists() {
     log.info("AI Tool: Intercepted request to fetch active stylists grid for today.");
@@ -56,13 +56,13 @@ final class BookingToolsImpl implements BookingTools {
         .collect(Collectors.joining("\n"));
   }
 
-  @Tool("Attempts to provisionally book a specific time slot for a client with a selected master for a specific service. Time format must be ISO local format: YYYY-MM-DDTHH:MM.")
+  @Tool("Предварительно забронировать определенный временной интервал для клиента с выбранным шаблоном для конкретной услуги. Формат времени должен соответствовать локальному формату ISO: YYYY-MM-DDTHH:MM.")
   @Override
   public String bookAppointmentSlot(
-      @P("The unique social account/messenger identifier of the active client (e.g., '12345678').") @MemoryId String platformId,
-      @P("The unique conversational alias string of the selected stylist (e.g., 'elena_colorist').") String masterAlias,
-      @P("The exact, official name of the requested procedure from the menu (e.g., 'Женская стрижка модельная').") String serviceName,
-      @P("The target appointment start date and time formatted strictly in ISO-8601 standard (e.g., '2026-08-25T14:30').") String dateTimeStr) {
+      @P("Уникальный идентификатор учетной записи в социальной сети/мессенджере активного клиента (например, '12345678').") @MemoryId String platformId,
+      @P("Уникальный диалоговый псевдоним выбранного стилиста (например, 'elena_colorist').") String masterAlias,
+      @P("Точное официальное название запрашиваемой услуги из каталога. (например, 'Женская стрижка модельная').") String serviceName,
+      @P("Целевая дата и время начала встречи. Должны быть оформлены строго в соответствии со стандартом ISO-8601. (например, '2026-08-25T14:30').") String dateTimeStr) {
 
     log.info("AI Tool Invocation: Attempting slot reservation using business keys for Client [{}], Master [{}] and Service [{}] at [{}]",
         platformId, masterAlias, serviceName, dateTimeStr);
@@ -85,10 +85,10 @@ final class BookingToolsImpl implements BookingTools {
     }
   }
 
-  @Tool("Searches the official salon catalog for active services matching a descriptive keyword (e.g., 'haircut', 'coloring') to discover their exact official names.")
+  @Tool("Найти в официальном каталоге салона услуг по ключевому слову (например, «стрижка», «окрашивание»), их точные официальные названия.")
   @Override
   public String searchServices(
-      @P("The descriptive keyword to find matching services in the catalogue (e.g., 'стрижка').") String searchKeyword) {
+      @P("Ключевое слово для поиска соответствующих услуг в каталоге (например, «стрижка»).") String searchKeyword) {
     log.info("AI Tool: Processing service catalog query for keyword: [{}]", searchKeyword);
 
     try {

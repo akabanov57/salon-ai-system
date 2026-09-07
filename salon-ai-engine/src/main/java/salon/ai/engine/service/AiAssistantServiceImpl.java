@@ -52,7 +52,7 @@ final class AiAssistantServiceImpl implements AiAssistantService {
   public String processChat(ProcessMessageCommand command) {
     log.info("AI Hub: Запуск prompt-синтеза для операции Trace ID: [{}]", command.traceId());
 
-    final int maxTimeoutSeconds = 15;
+    final int maxTimeoutSeconds = 240;
 
     // Асинхронно отправляем команду в пулл виртуальных потоков Java 21
     Future<String> aiTask = aiExecutor.submit(() -> {

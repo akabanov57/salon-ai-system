@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
 
-  <!-- Standard clean console output configuration -->
+  <!-- 1. Оригинальный консольный аппендер (оставляем как есть) -->
   <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
     <encoder>
       <!-- FIX: Added [%X{traceId:-SYSTEM}] to track the contextual request lifecycle -->
@@ -9,9 +9,22 @@
     </encoder>
   </appender>
 
-  <!-- Root level logs are throttled to WARN to prevent third-party framework spam -->
-  <root level="WARN">
+  <!-- 2. Асинхронная обертка для CONSOLE -->
+  <appender name="ASYNC_CONSOLE" class="ch.qos.logback.classic.AsyncAppender">
+    <!-- Ссылаемся на наш консольный вывод -->
     <appender-ref ref="CONSOLE" />
+
+    <!-- Настройки для предотвращения потери логов DEBUG от jOOQ/DB -->
+    <queueSize>1024</queueSize>             <!-- Увеличили буфер, так как SQL-логи идут пачками -->
+    <discardingThreshold>0</discardingThreshold> <!-- НЕ удалять логи DEBUG/INFO при заполнении очереди -->
+    <neverBlock>false</neverBlock>          <!-- Если очередь переполнится, приложение притормозит, -->
+    <!-- но гарантированно запишет все шаги транзакций -->
+    <includeCallerData>false</includeCallerData> <!-- Отключаем тяжелый сбор номеров строк кода -->
+  </appender>
+
+  <!-- 3. Корневой логгер теперь направляем в АСИНХРОННЫЙ аппендер -->
+  <root level="WARN">
+    <appender-ref ref="ASYNC_CONSOLE" /> <!-- Изменено на ASYNC_CONSOLE -->
   </root>
 
   <!-- Elevate our custom application layer messages to INFO -->

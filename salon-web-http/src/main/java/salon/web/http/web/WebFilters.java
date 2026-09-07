@@ -35,15 +35,15 @@ final class WebFilters {
   // Унифицированный эндпоинт для точного матчинга на границе сети
   private static final String TELEGRAM_WEBHOOK_PATH = "/api/v1/webhooks/telegram";
 
-  private final TelegramVerificationService telegramService;
+  private final TelegramVerificationService telegramVerificationService;
   private final IdempotencyService idempotencyService;
   private final NotificationService notificationService;
 
   WebFilters(
-      @External TelegramVerificationService telegramService,
+      @External TelegramVerificationService telegramVerificationService,
       @External IdempotencyService idempotencyService,
       @External NotificationService notificationService) {
-    this.telegramService = telegramService;
+    this.telegramVerificationService = telegramVerificationService;
     this.idempotencyService = idempotencyService;
     this.notificationService = notificationService;
   }
@@ -94,7 +94,7 @@ final class WebFilters {
     if ("POST".equalsIgnoreCase(ctx.method()) && TELEGRAM_WEBHOOK_PATH.equals(ctx.path())) {
       String telegramHeaderToken = ctx.header("X-Telegram-Bot-Api-Secret-Token");
 
-      boolean isAuthorized = telegramService.isValidTelegramRequest(telegramHeaderToken);
+      boolean isAuthorized = telegramVerificationService.isValidTelegramRequest(telegramHeaderToken);
       if (!isAuthorized) {
         log.warn("Блокировка на границе сети: Неверный секретный токен вебхука Telegram. Доступ отклонен.");
         ctx.status(401).text("Unauthorized: Invalid webhook secret token source.");

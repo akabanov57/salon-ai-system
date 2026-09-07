@@ -1,6 +1,8 @@
 package salon.api.service;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.List;
 import java.util.Optional;
 import salon.api.model.Appointment;
@@ -47,16 +49,43 @@ public interface BookingService {
 
   /**
    * <h3>Бизнес-метод: Проверка фактической занятости и доступности мастера</h3>
-   * Вычисляет, находится ли мастер на рабочей смене и свободен ли запрашиваемый временной интервал.
+   * Вычисляет, находится ли мастер на рабочей смене и свободен ли запрашиваемый временной
+   * интервал.
    */
-  boolean isMasterAvailableAt(Long masterId, Long serviceId, LocalDateTime time, int durationMinutes);
+  boolean isMasterAvailableAt(Long masterId, Long serviceId, LocalDateTime time,
+      int durationMinutes);
 
   /**
-   * Выполняет поиск активных услуг в каталоге по текстовому совпадению.
-   * Используется ИИ-ассистентом для извлечения точных идентификаторов услуг.
+   * Выполняет поиск активных услуг в каталоге по текстовому совпадению. Используется ИИ-ассистентом
+   * для извлечения точных идентификаторов услуг.
    *
    * @param keyword Ключевое слово для полнотекстового или LIKE поиска
    * @return Список найденных услуг, соответствующих критерию
    */
   List<CatalogService> searchServicesInCatalog(String keyword);
+
+  /**
+   * <h3>Бизнес-метод: Получение квалифицированных и свободных мастеров</h3>
+   * <p>
+   * Выполняет аналитический поиск в СУБД и возвращает список мастеров, которые: 1. Находятся на
+   * рабочей смене в указанную дату. 2. Обладают навыком/квалификацией для оказания запрашиваемой
+   * услуги. 3. Имеют хотя бы одно свободное временное окно внутри указанного интервала, достаточное
+   * для полной длительности этой услуги.
+   * </p>
+   *
+   * @param serviceName Официальное или поисковое наименование процедуры (слот от ИИ).
+   * @param date        Целевая дата визита.
+   * @param timeFrom    Нижняя граница желаемого интервала времени.
+   * @param timeTo      Верхняя граница желаемого интервала времени.
+   * @return Список доменных объектов мастеров, готовых принять клиента.
+   * @throws IllegalArgumentException если serviceName равен {@code null} или является пустой строкой.
+   * @throws salon.api.exception.StorageInfrastructureException если произошел критический сбой СУБД.
+   * @throws NullPointerException если date, или timeFrom, или timeTo равен {@code null}.
+   */
+  List<Master> getAvailableMastersForServiceInterval(
+      String serviceName,
+      LocalDate date,
+      LocalTime timeFrom,
+      LocalTime timeTo
+  );
 }

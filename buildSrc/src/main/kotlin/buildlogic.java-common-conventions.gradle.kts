@@ -14,7 +14,7 @@ repositories {
 
 dependencies {
     implementation("org.slf4j:slf4j-api:2.0.18")
-    runtimeOnly("ch.qos.logback:logback-classic:1.5.37")
+    runtimeOnly("ch.qos.logback:logback-classic:1.6.3")
     // Use JUnit Jupiter for testing.
     testImplementation("org.junit.jupiter:junit-jupiter:6.0.1")
 
