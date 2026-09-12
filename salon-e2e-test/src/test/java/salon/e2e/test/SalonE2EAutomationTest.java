@@ -25,7 +25,7 @@ import java.net.http.HttpResponse;
 import java.security.KeyManagementException;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
-import java.time.LocalDateTime;
+import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -41,6 +41,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import salon.api.model.AppointmentStatus;
+import salon.api.model.PlatformType;
+import salon.api.service.ChatMemoryService;
 
 /**
  * <h3>Сквозной системный автотест без использования Mock-заглушек</h3>
@@ -56,6 +59,7 @@ class SalonE2EAutomationTest {
   private static DSLContext dslCtx;
   private static Server salonServer;
   private static Server telegramMockServer;
+  private static ChatMemoryService chatMemory;
   // Потокобезопасный буфер для сохранения отправленных бэкендом пакетов
   private static final List<String> interceptedOutboundPayloads = Collections.synchronizedList(new ArrayList<>());
   /**
@@ -132,6 +136,7 @@ class SalonE2EAutomationTest {
     // Локальная фабрика LangChain4j автоматически подключится к вашей Ollama (Llama3).
     beanScope = BeanScope.builder().build();
     dslCtx = beanScope.get(DSLContext.class);
+    chatMemory = beanScope.get(ChatMemoryService.class);
 
     // 3. Вытаскиваем уже ИДЕАЛЬНО настроенный Jex (с Jsonb, фильтрами и роутами) прямо из DI
     Jex jex = beanScope.get(Jex.class);
@@ -183,6 +188,13 @@ class SalonE2EAutomationTest {
         .set(SERVICES.PRICE, BigDecimal.valueOf(2500.00))
         .execute();
 
+    dslCtx.insertInto(SERVICES)
+        .set(SERVICES.ID, 2L)
+        .set(SERVICES.NAME, "Мужская стрижка модельная")
+        .set(SERVICES.DURATION_MINUTES, 60)
+        .set(SERVICES.PRICE, BigDecimal.valueOf(2500.00))
+        .execute();
+
     // 2. Регистрация мастера с обязательным уникальным ALIAS
     dslCtx.insertInto(MASTERS)
         .set(MASTERS.ID, 1L)
@@ -192,10 +204,15 @@ class SalonE2EAutomationTest {
         .set(MASTERS.SPECIALIZATION, "Топ-стилист")
         .execute();
 
-    // 3. Формирование матрицы компетенций (Связываем Елену со стрижкой)
+    // 3. Формирование матрицы компетенций (Связываем Елену со стрижками)
     dslCtx.insertInto(MASTER_SERVICES)
         .set(MASTER_SERVICES.MASTER_ID, 1L)
         .set(MASTER_SERVICES.SERVICE_ID, 1L)
+        .execute();
+
+    dslCtx.insertInto(MASTER_SERVICES)
+        .set(MASTER_SERVICES.MASTER_ID, 1L)
+        .set(MASTER_SERVICES.SERVICE_ID, 2L)
         .execute();
 
     // 4. Регламентируем часы работы заведения (25 августа 2026 года — это Вторник)
@@ -205,12 +222,16 @@ class SalonE2EAutomationTest {
         .set(SALON_WEEKLY_SCHEDULE.CLOSE_TIME, LocalTime.parse("20:00:00"))
         .execute();
 
+    // Calculate relative anchor points matching conversational inputs
+    LocalDate tomorrow = LocalDate.now().plusDays(1);
+    String tomorrowDayOfWeek = tomorrow.getDayOfWeek().name(); // e.g., "SUNDAY", "MONDAY"
+
     // 5. Публикуем официальную рабочую смену мастера Елены под таймлайн теста
     dslCtx.insertInto(MASTER_SHIFTS)
         .set(MASTER_SHIFTS.ID, 1L)
         .set(MASTER_SHIFTS.MASTER_ID, 1L)
-        .set(MASTER_SHIFTS.SHIFT_START, LocalDateTime.parse("2026-08-25T10:00:00"))
-        .set(MASTER_SHIFTS.SHIFT_END, LocalDateTime.parse("2026-08-25T20:00:00"))
+        .set(MASTER_SHIFTS.SHIFT_START, tomorrow.atTime(10, 0))
+        .set(MASTER_SHIFTS.SHIFT_END, tomorrow.atTime(20, 0))
         .execute();
 
     log.info("[E2E Test] Наполнение базы данных успешно завершено. Контур готов к прогону.");
@@ -223,7 +244,10 @@ class SalonE2EAutomationTest {
     // -----------------------------------------------------------------
     String turn1JsonPayload = """
         {
+          "update_id": 20001,
           "message": {
+            "message_id": 10001,
+            "id": 10001,
             "chat": { "id": %s },
             "from": { "firstName": "Natalia" },
             "text": "Привет! Хочу записаться на стрижку"
@@ -247,34 +271,77 @@ class SalonE2EAutomationTest {
     assertEquals(2, dslCtx.fetchCount(MESSAGE_TRACES), "В MESSAGE_TRACES должен записаться входящий след.");
 
     // -----------------------------------------------------------------
-    // ТУР 2: Финальный вызов ИИ-инструмента и создание талона бронирования
+    // ТУР 2: Уточнение вида стрижки (Разрешение амбивалентности)
     // -----------------------------------------------------------------
-//    String turn2JsonPayload = """
-//        {
-//          "message": {
-//            "chat": { "id": %s },
-//            "from": { "firstName": "Natalia" },
-//            "text": "Запиши меня к Елене на 25 августа в 14:30"
-//          }
-//        }
-//        """.formatted(MOCK_CHAT_ID);
-//
-//    HttpRequest request2 = HttpRequest.newBuilder()
-//        .uri(URI.create(BASE_URL))
-//        .header("Content-Type", "application/json")
-//        .POST(HttpRequest.BodyPublishers.ofString(turn2JsonPayload))
-//        .build();
-//
-//    HttpResponse<String> response2 = telegram.send(request2, HttpResponse.BodyHandlers.ofString());
-//    assertEquals(200, response2.statusCode());
-//
-//    // ФИНАЛЬНАЯ ВЕРИФИКАЦИЯ: База данных обязана зафиксировать создание талона бронирования визита!
-//    assertEquals(1, dslCtx.fetchCount(APPOINTMENTS), "Llama3 обязана успешно распознать контекст и совершить запись в APPOINTMENTS.");
-//
-//    var booking = dslCtx.selectFrom(APPOINTMENTS).fetchOne();
-//    assertNotNull(booking);
-//    assertTrue(booking.getTicketCode().startsWith("SB-260825-"), "Код билета обязан содержать префикс даты.");
-//    assertEquals(AppointmentStatus.AI_PENDING, booking.getStatus(), "Статус записи должен быть предварительным (AI_PENDING).");
+    String turn2JsonPayload = """
+        {
+          "update_id": 20002,
+          "message": {
+            "message_id": 10002,
+            "id": 10002,
+            "chat": { "id": %s },
+            "from": { "firstName": "Natalia" },
+            "text": "Мне нужна Женская стрижка"
+          }
+        }
+        """.formatted(MOCK_CHAT_ID);
+
+    HttpResponse<String> response2 = telegram.request()
+        .header("X-Telegram-Bot-Api-Secret-Token", telegramSecretToken)
+        .path("api/v1/webhooks/telegram")
+        .body(turn2JsonPayload)
+        .POST()
+        .asString();
+
+    assertEquals(204, response2.statusCode(), "Сервер обязан вернуть успешный статус HTTP 204 OK после уточнения услуги.");
+    // В логах чата прибавляется еще 2 записи (INBOUND-уточнение и OUTBOUND-список мастеров)
+    assertEquals(4, dslCtx.fetchCount(MESSAGE_TRACES), "Сессия памяти должна зафиксировать логи второго тура диалога.");
+
+    // -----------------------------------------------------------------
+    // ТУР 3: Выбор конкретного мастера и фиксация целевого времени
+    // -----------------------------------------------------------------
+    // Так как Llama 3.2 работает с живым DateTimeParser, мы используем динамическую
+    // строковую дату (например, "завтра"), чтобы парсер корректно высчитал LocalDateTime.
+    String turn3JsonPayload = """
+        {
+          "update_id": 20003,
+          "message": {
+            "message_id": 10003,
+            "id": 10003,
+            "chat": { "id": %s },
+            "from": { "firstName": "Natalia" },
+            "text": "Запиши меня к elena_colorist на завтра 14:30"
+          }
+        }
+        """.formatted(MOCK_CHAT_ID);
+
+    HttpResponse<String> response3 = telegram.request()
+        .header("X-Telegram-Bot-Api-Secret-Token", telegramSecretToken)
+        .path("api/v1/webhooks/telegram")
+        .body(turn3JsonPayload)
+        .POST()
+        .asString();
+
+    assertEquals(204, response3.statusCode(), "Сервер обязан вернуть успешный статус HTTP 204 OK на финальном шаге бронирования.");
+
+    // =================================================================================
+    // ФИНАЛЬНАЯ ВЕРИФИКАЦИЯ: База данных обязана зафиксировать создание талона бронирования!
+    // =================================================================================
+    assertEquals(1, dslCtx.fetchCount(APPOINTMENTS),
+        "Llama3 совместно со стейт-машиной обязаны успешно распознать контекст и совершить запись в APPOINTMENTS.");
+
+    // Извлекаем созданную запись для детального доменного аудита полей
+    var booking = dslCtx.selectFrom(APPOINTMENTS).fetchOne();
+
+    assertNotNull(booking, "Должна присутствовать одна созданная запись визита.");
+    assertNotNull(booking.getTicketCode(), "Бизнес-код билета не должен быть null.");
+    assertEquals(AppointmentStatus.AI_PENDING, booking.getStatus(), "Статус записи должен быть предварительным (AI_PENDING).");
+
+    // Проверяем, что в слотах сессии СУБД зафиксировано состояние CONFIRMATION_PENDING
+    // (Это гарантирует, что при следующем сообщении "Да, подтверждаю" запись перейдет в APPROVED)
+    var finalContextOpt = chatMemory.findContextByClientId(PlatformType.TELEGRAM, String.valueOf(MOCK_CHAT_ID));
+    assertTrue(finalContextOpt.isPresent(), "Сессия диалога должна сохраниться в ChatMemoryRepository.");
+    assertEquals("CONFIRMATION_PENDING", finalContextOpt.get().currentState(), "Финальный стейт автомата должен быть CONFIRMATION_PENDING.");
   }
 
 }

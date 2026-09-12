@@ -1,6 +1,5 @@
 package salon.ai.engine.internal.impl;
 
-import jakarta.inject.Named;
 import jakarta.inject.Singleton;
 import java.time.DayOfWeek;
 import java.time.LocalDate;

@@ -48,9 +48,9 @@ public record DialogueContext(
      */
     public Slots updateWith(LlamaResponse.Slots source) {
       return new Slots(
-          source.service() != null ? source.service() : this.service,
-          source.stylist() != null ? source.stylist() : this.stylist,
-          source.datetimeRaw() != null ? source.datetimeRaw() : this.datetimeRaw,
+          (source.service() != null && !source.service().isBlank()) ? source.service() : this.service,
+          (source.stylist() != null && !source.stylist().isBlank()) ? source.stylist() : this.stylist,
+          (source.datetimeRaw() != null && !source.datetimeRaw().isBlank()) ? source.datetimeRaw() : this.datetimeRaw,
           this.confirmedDatetime // Сохраняем старое валидированное время нетронутым
       );
     }
