@@ -162,12 +162,14 @@ final class WebConfiguration {
   @Bean
   HttpClient baseHttpClient(Jsonb jsonb) {
     final String baseTargetUrl = Config.get("telegram.api.baseUrl", "https://api.telegram.org");
+    // Формат времени ISO 8601
+    final Duration requestTimeout = Config.getDuration("telegram.api.request-timeout", "PT30S");
     final boolean sslEnabled = Config.getBool("jex.ssl.enabled", false);
 
-    log.info("Инициализация исходящего шлюза Avaje HttpClient: {}", baseTargetUrl);
+    log.info("Инициализация исходящего шлюза Avaje HttpClient: {} с тайм-аутом: {}", baseTargetUrl, requestTimeout);
 
     final var builder = HttpClient.builder()
-        .requestTimeout(Duration.ofMinutes(4))
+        .requestTimeout(requestTimeout)
         .baseUrl(baseTargetUrl)
         .bodyAdapter(new JsonbBodyAdapter(jsonb));
 

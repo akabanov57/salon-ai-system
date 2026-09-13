@@ -1,6 +1,5 @@
 package salon.ai.engine.config;
 
-import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.ollama.OllamaChatModel;
 import dev.langchain4j.service.AiServices;
@@ -28,14 +27,14 @@ final class AiEngineConfigurationFactory {
   ChatModel chatModel() {
     final String baseUrl = Config.get("ai.model.url", "http://docker.home.org:11434");
     final String modelName = Config.get("ai.model.name", "llama3.2:3b");
-    final int timeoutSeconds = Config.getInt("ai.model.timeout-seconds", 240);
+    final Duration modelRequestTimeout = Config.getDuration("ai.model.request.timeout", "PT4M");
 
     log.info("Initializing LangChain4j ChatModel target provider via Ollama [URL: {}, Model: {}]", baseUrl, modelName);
 
     return OllamaChatModel.builder()
         .baseUrl(baseUrl)
         .modelName(modelName)
-        .timeout(Duration.ofSeconds(timeoutSeconds))
+        .timeout(modelRequestTimeout)
         .temperature(0.0) // Низкая температура снижает галлюцинации и делает вызовы инструментов точными
         .build();
   }

@@ -32,9 +32,9 @@ final class TelegramWebhookInitializerImpl implements TelegramWebhookInitializer
 
     final String rawBotToken = Config.get("telegram.bot.token", "");
     this.urlTokenPrefix = "bot" + rawBotToken;
-    this.publicUrl = Config.get("salon.telegram.public.url", "");
+    this.publicUrl = Config.get("salon.telegram.webhook.url", "");
     this.secretToken = Config.get("telegram.webhook.secret-token", "");
-    this.clearOnShutdown = Config.getBool("telegram.webhook.clear-on-shutdown", false);
+    this.clearOnShutdown = Config.getBool("salon.telegram.webhook.clear-on-shutdown", false);
   }
 
   @Override
