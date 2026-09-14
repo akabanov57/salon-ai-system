@@ -7,20 +7,20 @@ import io.avaje.jsonb.Json;
  * <p>Инкапсулирует текущую точку графа конечного автомата, извлеченные сущности и метаданные.</p>
  */
 public record DialogueContext(
-    String currentState,
+    DialogueState currentState,
     Slots slots,
     Metadata metadata
 ) {
 
   public static DialogueContext createNew(String userId) {
     return new DialogueContext(
-        "INIT",
+        DialogueState.INIT,
         new Slots(null, null, null, null),
         new Metadata(0, 0, userId)
     );
   }
 
-  public DialogueContext withState(String newState) {
+  public DialogueContext withState(DialogueState newState) {
     return new DialogueContext(newState, this.slots, this.metadata);
   }
 

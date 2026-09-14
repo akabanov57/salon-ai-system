@@ -38,6 +38,7 @@ import salon.api.model.Appointment;
 import salon.api.model.AppointmentStatus;
 import salon.api.model.CatalogService;
 import salon.api.model.DialogueContext;
+import salon.api.model.DialogueState;
 import salon.api.model.LlamaResponse;
 import salon.api.model.Master;
 import salon.api.model.PlatformType;
@@ -264,7 +265,7 @@ class AiAssistantServiceImplTest {
         contextCaptor.capture());
     DialogueContext contextAfterTurn1 = contextCaptor.getValue();
 
-    assertEquals("STYLIST_PREFERENCE", contextAfterTurn1.currentState());
+    assertEquals(DialogueState.STYLIST_PREFERENCE, contextAfterTurn1.currentState());
     assertEquals("Мужская стрижка", contextAfterTurn1.slots().service());
     assertNull(contextAfterTurn1.slots().stylist());
 
@@ -310,7 +311,7 @@ class AiAssistantServiceImplTest {
         finalContextCaptor.capture());
     DialogueContext finalContext = finalContextCaptor.getValue();
 
-    assertEquals("CONFIRMATION_PENDING", finalContext.currentState());
+    assertEquals(DialogueState.CONFIRMATION_PENDING, finalContext.currentState());
     assertEquals("elena_colorist", finalContext.slots().stylist());
     assertNotNull(finalContext.slots().confirmedDatetime());
   }
@@ -364,7 +365,7 @@ class AiAssistantServiceImplTest {
     verify(chatMemoryMock, times(1)).saveContext(eq(testPlatformType), eq(testPlatformId), contextCaptor.capture());
     DialogueContext savedContext = contextCaptor.getValue();
 
-    assertEquals("AVAILABILITY_MATCH", savedContext.currentState(), "Стейт должен переключиться в AVAILABILITY_MATCH");
+    assertEquals(DialogueState.AVAILABILITY_MATCH, savedContext.currentState(), "Стейт должен переключиться в AVAILABILITY_MATCH");
     assertEquals("Женская стрижка модельная", savedContext.slots().service(), "Имя услуги должно перезаписаться в памяти СУБД");
   }
 
@@ -390,7 +391,7 @@ class AiAssistantServiceImplTest {
   void shouldInterceptChronologicalAmbiguityWhenParserReturnsEmptyOnVagueTime() {
     // Given: Сессия уже зафиксировала Мужскую стрижку и мастера на этапе подтверждения
     DialogueContext existingContext = new DialogueContext(
-        "CONFIRMATION_PENDING",
+        DialogueState.CONFIRMATION_PENDING,
         new DialogueContext.Slots("Мужская стрижка", "elena_colorist", "завтра в 14:00", null),
         new DialogueContext.Metadata(2, 0, testPlatformId)
     );
@@ -428,6 +429,6 @@ class AiAssistantServiceImplTest {
     verify(chatMemoryMock, times(1)).saveContext(eq(testPlatformType), eq(testPlatformId), contextCaptor.capture());
     DialogueContext savedContext = contextCaptor.getValue();
 
-    assertEquals("CLARIFY_INTENT", savedContext.currentState(), "Система должна зайти в буфер CLARIFY_INTENT");
+    assertEquals(DialogueState.CLARIFY_INTENT, savedContext.currentState(), "Система должна зайти в буфер CLARIFY_INTENT");
   }
 }

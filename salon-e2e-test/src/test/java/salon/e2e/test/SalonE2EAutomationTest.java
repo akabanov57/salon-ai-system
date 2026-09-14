@@ -42,6 +42,7 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import salon.api.model.AppointmentStatus;
+import salon.api.model.DialogueState;
 import salon.api.model.PlatformType;
 import salon.api.service.ChatMemoryService;
 
@@ -341,7 +342,7 @@ class SalonE2EAutomationTest {
     // (Это гарантирует, что при следующем сообщении "Да, подтверждаю" запись перейдет в APPROVED)
     var finalContextOpt = chatMemory.findContextByClientId(PlatformType.TELEGRAM, String.valueOf(MOCK_CHAT_ID));
     assertTrue(finalContextOpt.isPresent(), "Сессия диалога должна сохраниться в ChatMemoryRepository.");
-    assertEquals("CONFIRMATION_PENDING", finalContextOpt.get().currentState(), "Финальный стейт автомата должен быть CONFIRMATION_PENDING.");
+    assertEquals(DialogueState.CONFIRMATION_PENDING, finalContextOpt.get().currentState(), "Финальный стейт автомата должен быть CONFIRMATION_PENDING.");
   }
 
 }

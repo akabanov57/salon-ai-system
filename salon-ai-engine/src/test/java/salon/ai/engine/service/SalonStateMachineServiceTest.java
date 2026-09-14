@@ -25,6 +25,7 @@ import salon.api.model.AppointmentStatus;
 import salon.api.model.CatalogService;
 import salon.api.model.DialogueContext;
 import salon.api.model.DialogueResponse;
+import salon.api.model.DialogueState;
 import salon.api.model.LlamaResponse;
 import salon.api.service.BookingService;
 import salon.api.service.ChatMemoryService;
@@ -80,7 +81,7 @@ public class SalonStateMachineServiceTest {
   void shouldInterceptAmbiguityWhenMultipleServicesFound() {
     // Given: Текстовое сырое поле datetimeRaw содержит единую строку
     DialogueContext context = new DialogueContext(
-        "INIT",
+        DialogueState.INIT,
         new DialogueContext.Slots("стрижка", null, "завтра в 14:00", null),
         new DialogueContext.Metadata(1, 0, testUserId)
     );
@@ -99,7 +100,7 @@ public class SalonStateMachineServiceTest {
     DialogueResponse response = stateMachineService.processTurn(llamaInput, context);
 
     assertNotNull(response);
-    assertEquals("SERVICE_SELECTION", response.updatedContext().currentState());
+    assertEquals(DialogueState.SERVICE_SELECTION, response.updatedContext().currentState());
     assertNull(response.updatedContext().slots().service());
 
     // Гарантируем, что методы подбора мастеров и бронирования даже не вызывались
@@ -128,7 +129,7 @@ public class SalonStateMachineServiceTest {
   void shouldInterceptAmbiguityWhenSingleServiceIsFoundButNameIsNotExactMatch() {
     // Given
     DialogueContext context = new DialogueContext(
-        "INIT",
+        DialogueState.INIT,
         new DialogueContext.Slots("стрижка", null, "завтра в 14:00", null),
         new DialogueContext.Metadata(1, 0, testUserId)
     );
@@ -152,7 +153,7 @@ public class SalonStateMachineServiceTest {
     DialogueContext updatedCtx = response.updatedContext();
 
     // Стейт должен успешно перейти в AVAILABILITY_MATCH благодаря успешной авто-нормализации
-    assertEquals("AVAILABILITY_MATCH", updatedCtx.currentState(), "Стейт-машина должна продвинуться вперед");
+    assertEquals(DialogueState.AVAILABILITY_MATCH, updatedCtx.currentState(), "Стейт-машина должна продвинуться вперед");
 
     // Слот услуги должен автоматически перезаписаться официальным именем из СУБД
     assertEquals("Женская стрижка модельная", updatedCtx.slots().service(), "Имя услуги должно автоматически нормализоваться");
@@ -181,7 +182,7 @@ public class SalonStateMachineServiceTest {
   void shouldExecuteFastTrackBookingWhenSingleServiceAndSlotIsFree() {
     // Given: Все слоты заполнены точечно, услуга уникальна ("Мужская стрижка")
     DialogueContext context = new DialogueContext(
-        "INIT",
+        DialogueState.INIT,
         new DialogueContext.Slots("Мужская стрижка", "elena_colorist", "завтра в 14:00", null),
         new DialogueContext.Metadata(1, 0, testUserId)
     );
@@ -215,7 +216,7 @@ public class SalonStateMachineServiceTest {
     DialogueResponse response = stateMachineService.processTurn(llamaInput, context);
 
     assertNotNull(response);
-    assertEquals("CONFIRMATION_PENDING", response.updatedContext().currentState());
+    assertEquals(DialogueState.CONFIRMATION_PENDING, response.updatedContext().currentState());
   }
 
   /**
@@ -239,7 +240,7 @@ public class SalonStateMachineServiceTest {
   void shouldResetContextToInitWhenCancelIntentReceived() {
     // Given: Контекст частично заполнен параметрами
     DialogueContext context = new DialogueContext(
-        "STYLIST_PREFERENCE",
+        DialogueState.STYLIST_PREFERENCE,
         new DialogueContext.Slots("Мужская стрижка", null, "завтра", null),
         new DialogueContext.Metadata(3, 0, testUserId)
     );
@@ -250,7 +251,7 @@ public class SalonStateMachineServiceTest {
     DialogueResponse response = stateMachineService.processTurn(llamaInput, context);
 
     assertNotNull(response);
-    assertEquals("INIT", response.updatedContext().currentState());
+    assertEquals(DialogueState.INIT, response.updatedContext().currentState());
     assertNull(response.updatedContext().slots().service());
   }
 

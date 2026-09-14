@@ -1,6 +1,6 @@
 plugins {
     id("buildlogic.java-library-conventions")
-    // Подключаем плагин кодогенерации jOOQ из нашего TOML каталога версий
+    // Подключаем плагин кодогенерации jOOQ из нашего ТОМа каталога версий
     alias(libs.plugins.jooq.codegen)
 }
 
@@ -67,6 +67,11 @@ jooq {
                         converter = "org.jooq.impl.EnumConverter"
                         // Применяем это правило строго к полю STATUS таблицы APPOINTMENTS
                         includeExpression = "APPOINTMENTS\\.STATUS"
+                    }
+                    forcedType {
+                        userType = "salon.api.model.DialogueState"
+                        converter = "org.jooq.impl.EnumConverter"
+                        includeExpression = "AI_CONVERSATIONAL_CONTEXTS\\.CURRENT_STATE"
                     }
                 }
 

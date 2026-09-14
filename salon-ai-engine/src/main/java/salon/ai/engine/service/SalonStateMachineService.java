@@ -13,6 +13,7 @@ import salon.api.model.Appointment;
 import salon.api.model.CatalogService;
 import salon.api.model.DialogueContext;
 import salon.api.model.DialogueResponse;
+import salon.api.model.DialogueState;
 import salon.api.model.LlamaResponse;
 import salon.api.model.Master;
 import salon.api.service.BookingService;
@@ -27,15 +28,6 @@ import salon.api.service.BookingService;
  */
 @Singleton
 final class SalonStateMachineService {
-
-  public enum DialogueState {
-    INIT,
-    SERVICE_SELECTION,
-    AVAILABILITY_MATCH,
-    STYLIST_PREFERENCE,
-    CONFIRMATION_PENDING,
-    CLARIFY_INTENT
-  }
 
   private final BookingService bookingService;
   private final DateTimeParser datetimeParser;
@@ -68,7 +60,7 @@ final class SalonStateMachineService {
   }
 
   DialogueResponse processTurn(LlamaResponse parsedData, DialogueContext context) {
-    DialogueState currentState = parseState(context.currentState());
+    DialogueState currentState = context.currentState() != null ? context.currentState() : DialogueState.INIT;
     DialogueEvent event = mapToEvent(parsedData, currentState);
 
     DialogueContext currentContext = new DialogueContext(
@@ -131,7 +123,7 @@ final class SalonStateMachineService {
       return handleMastersOffer(currentContext);
     }
     if (slots.service() != null && slots.datetimeRaw() == null && slots.stylist() == null) {
-      return new DialogueResponse(currentContext.withState(DialogueState.AVAILABILITY_MATCH.name()),
+      return new DialogueResponse(currentContext.withState(DialogueState.AVAILABILITY_MATCH),
           String.format("Отлично, услуга '%s' выбрана. На какой день и время вам подобрать свободные окна?", slots.service()));
     }
     if (slots.service() != null && slots.datetimeRaw() != null) {
@@ -174,14 +166,6 @@ final class SalonStateMachineService {
     return defaultResponse(currentContext);
   }
 
-  private DialogueState parseState(String stateStr) {
-    try {
-      return stateStr != null ? DialogueState.valueOf(stateStr) : DialogueState.INIT;
-    } catch (IllegalArgumentException e) {
-      return DialogueState.INIT;
-    }
-  }
-
   private DialogueEvent mapToEvent(LlamaResponse parsedData, DialogueState currentState) {
     if ("cancel_or_reset".equals(parsedData.intent())) {
       return new DialogueEvent.CancelOrReset();
@@ -200,7 +184,7 @@ final class SalonStateMachineService {
   }
 
   private DialogueResponse handleAmbiguousDatetime(DialogueContext context) {
-    return new DialogueResponse(context.withState(DialogueState.CLARIFY_INTENT.name()),
+    return new DialogueResponse(context.withState(DialogueState.CLARIFY_INTENT),
         "Вы хотите выбрать другую дату для этой записи или полностью отменить её?");
   }
 
@@ -211,7 +195,7 @@ final class SalonStateMachineService {
         null,
         null
     );
-    return new DialogueResponse(context.withSlots(clearedDates).withState(DialogueState.AVAILABILITY_MATCH.name()),
+    return new DialogueResponse(context.withSlots(clearedDates).withState(DialogueState.AVAILABILITY_MATCH),
         "На какую дату и время вам подобрать окна?");
   }
 
@@ -221,14 +205,14 @@ final class SalonStateMachineService {
 
     if (foundServices.isEmpty()) {
       return new ServiceResolution.Ambiguous(new DialogueResponse(
-          ctx.withSlots(clearServiceSlot(ctx)).withState(DialogueState.SERVICE_SELECTION.name()),
+          ctx.withSlots(clearServiceSlot(ctx)).withState(DialogueState.SERVICE_SELECTION),
           String.format("Услуга '%s' не найдена в каталоге. Какая именно процедура вас интересует?", rawServiceInput)
       ));
     }
     if (foundServices.size() > 1) {
       String catalogOptionsStr = foundServices.stream().map(CatalogService::name).reduce((a, b) -> a + ", " + b).orElse("");
       return new ServiceResolution.Ambiguous(new DialogueResponse(
-          ctx.withSlots(clearServiceSlot(ctx)).withState(DialogueState.SERVICE_SELECTION.name()),
+          ctx.withSlots(clearServiceSlot(ctx)).withState(DialogueState.SERVICE_SELECTION),
           String.format("У нас есть несколько видов этой услуги: %s. Уточните, какая именно процедура вам необходима?", catalogOptionsStr)
       ));
     }
@@ -246,7 +230,7 @@ final class SalonStateMachineService {
     if ("choose_another_date".equals(parsedData.intent())) {
       DialogueContext.Slots clearedDates = new DialogueContext.Slots(ctx.slots().service(),
           ctx.slots().stylist(), null, null);
-      return new DialogueResponse(contextWithSlots(ctx, clearedDates).withState(DialogueState.AVAILABILITY_MATCH.name()),
+      return new DialogueResponse(contextWithSlots(ctx, clearedDates).withState(DialogueState.AVAILABILITY_MATCH),
           "На какую дату и время вам подобрать окна?");
     }
     return new DialogueResponse(DialogueContext.createNew(ctx.metadata().userId()),
@@ -265,7 +249,7 @@ final class SalonStateMachineService {
 
     List<CatalogService> services = bookingService.searchServicesInCatalog(ctx.slots().service());
     if (services.isEmpty()) {
-      return new DialogueResponse(ctx.withState(DialogueState.SERVICE_SELECTION.name()), "Услуга не найдена в каталоге.");
+      return new DialogueResponse(ctx.withState(DialogueState.SERVICE_SELECTION), "Услуга не найдена в каталоге.");
     }
     CatalogService targetService = services.getFirst();
     LocalDate date = parsedTimeOpt.get().toLocalDate();
@@ -274,12 +258,12 @@ final class SalonStateMachineService {
     List<Master> working = bookingService.getAvailableMastersForServiceInterval(
         targetService.name(), date, from, from.plusMinutes(targetService.durationMinutes()));
     if (working.isEmpty()) {
-      return new DialogueResponse(ctx.withState(DialogueState.AVAILABILITY_MATCH.name()),
+      return new DialogueResponse(ctx.withState(DialogueState.AVAILABILITY_MATCH),
           "В этот интервал времени нет свободных мастеров для данной услуги.");
     }
 
     String listStr = working.stream().map(Master::alias).reduce((a, b) -> a + ", " + b).orElse("");
-    return new DialogueResponse(ctx.withState(DialogueState.STYLIST_PREFERENCE.name()),
+    return new DialogueResponse(ctx.withState(DialogueState.STYLIST_PREFERENCE),
         String.format("На процедуру '%s' у нас свободны мастера: %s. Кто вам больше подходит?",
             targetService.name(), listStr));
   }
@@ -333,13 +317,13 @@ final class SalonStateMachineService {
       DialogueContext.Slots confirmed = new DialogueContext.Slots(targetService.name(),
           ctx.slots().stylist(), ctx.slots().datetimeRaw(), app.get().appointmentTime().toString());
       return Optional.of(
-          new DialogueResponse(ctx.withSlots(confirmed).withState(DialogueState.CONFIRMATION_PENDING.name()),
+          new DialogueResponse(ctx.withSlots(confirmed).withState(DialogueState.CONFIRMATION_PENDING),
               String.format(
                   "Отлично! Я зарезервировал время %s к мастеру %s. Подтверждаете запись?",
                   targetDateTime.toLocalTime(), ctx.slots().stylist())));
     }
 
-    return Optional.of(new DialogueResponse(ctx.withState(DialogueState.AVAILABILITY_MATCH.name()),
+    return Optional.of(new DialogueResponse(ctx.withState(DialogueState.AVAILABILITY_MATCH),
         String.format("Извините, время %s у мастера %s уже занято. Можем подобрать другое время?",
             targetDateTime.toLocalTime(), ctx.slots().stylist())));
   }

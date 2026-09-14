@@ -19,6 +19,7 @@ import salon.api.exception.IntegrityViolationException;
 import salon.api.exception.StorageInfrastructureException;
 import salon.api.model.DialogueContext;
 import salon.api.model.DialogueContext.Slots;
+import salon.api.model.DialogueState;
 import salon.api.model.PlatformType;
 import salon.api.service.ChatMemoryService;
 
@@ -49,8 +50,12 @@ final class ChatMemoryServiceImpl implements ChatMemoryService {
           .map(record -> {
             try {
               DialogueContext.Slots slots = slotsJsonType.fromJson(record.get(AI_CONVERSATIONAL_CONTEXTS.SERIALIZED_SLOTS));
+              DialogueState state = record.get(AI_CONVERSATIONAL_CONTEXTS.CURRENT_STATE);
+              if (state == null) {
+                state = DialogueState.INIT;
+              }
               return new DialogueContext(
-                  record.get(AI_CONVERSATIONAL_CONTEXTS.CURRENT_STATE),
+                  state,
                   slots,
                   new DialogueContext.Metadata(0, 0, platformId)
               );
@@ -69,6 +74,7 @@ final class ChatMemoryServiceImpl implements ChatMemoryService {
   public void saveContext(PlatformType platformType, String platformId, DialogueContext context) {
     try {
       String jsonSlots = slotsJsonType.toJson(context.slots());
+      DialogueState state = context.currentState() != null ? context.currentState() : DialogueState.INIT;
 
       // Выполнение в рамках безопасной изолированной транзакции jOOQ
       dsl.transaction(configuration -> {
@@ -88,10 +94,10 @@ final class ChatMemoryServiceImpl implements ChatMemoryService {
 
         transactionalDsl.insertInto(AI_CONVERSATIONAL_CONTEXTS)
             .set(AI_CONVERSATIONAL_CONTEXTS.CLIENT_ID, clientId)
-            .set(AI_CONVERSATIONAL_CONTEXTS.CURRENT_STATE, context.currentState())
+            .set(AI_CONVERSATIONAL_CONTEXTS.CURRENT_STATE, state)
             .set(AI_CONVERSATIONAL_CONTEXTS.SERIALIZED_SLOTS, jsonSlots)
             .onDuplicateKeyUpdate()
-            .set(AI_CONVERSATIONAL_CONTEXTS.CURRENT_STATE, context.currentState())
+            .set(AI_CONVERSATIONAL_CONTEXTS.CURRENT_STATE, state)
             .set(AI_CONVERSATIONAL_CONTEXTS.SERIALIZED_SLOTS, jsonSlots)
             .set(AI_CONVERSATIONAL_CONTEXTS.UPDATED_AT, java.time.LocalDateTime.now())
             .execute();
