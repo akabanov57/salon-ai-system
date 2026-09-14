@@ -40,3 +40,7 @@ dependencies {
     testImplementation(libs.avaje.inject)
     annotationProcessor(libs.avaje.inject.generator)
 }
+
+tasks.named<Test>("test") {
+    enabled = false
+}

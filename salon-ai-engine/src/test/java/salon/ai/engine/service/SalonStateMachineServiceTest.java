@@ -27,6 +27,7 @@ import salon.api.model.DialogueContext;
 import salon.api.model.DialogueResponse;
 import salon.api.model.LlamaResponse;
 import salon.api.service.BookingService;
+import salon.api.service.ChatMemoryService;
 
 /**
  * <h2>Тестовый класс для верификации бизнес-правил стейт-машины диалогов</h2>
