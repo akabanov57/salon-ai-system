@@ -18,6 +18,13 @@ public record ProcessMessageCommand(
     @NotBlank(message = "Идентификатор отправителя на платформе не может быть пустым.")
     String platformId,
 
+    /**
+     * Идентификатор сообщения в мессенджере (для telegram это значение update_id).
+     * Необходим для обеспечения идемпотентности обработки.
+     */
+    @NotBlank(message = "Идентификатор сообщения мессенджера обязателен для проверки идемпотентности.")
+    String messengerMessageId,
+
     String displayName, // Может быть null, мы нормализуем его дефолтом "Guest" на уровне сервиса СУБД
 
     @NotNull(message = "Текст входящего сообщения не может быть null.")

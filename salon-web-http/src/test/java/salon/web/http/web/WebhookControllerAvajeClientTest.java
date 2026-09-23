@@ -28,7 +28,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
-import salon.api.exception.IntegrityViolationException;
+import salon.api.exception.MessageIdempotencyException;
 import salon.api.exception.StorageInfrastructureException;
 import salon.api.model.PlatformType;
 import salon.api.model.ProcessMessageCommand;
@@ -138,17 +138,12 @@ class WebhookControllerAvajeClientTest {
   }
 
   @Test
-  void shouldReceivePostRequestAndRouteToServiceWithStatus204() {
+  void shouldReceivePostRequestAndRouteToServiceWithStatus200() {
 
     // Arrange
     String mockAiReply = "Пожалуйста, выберите мастера...";
     String expectedPlatformId = "12345678";
     long mockUpdateId = 876543210L;
-
-    // 1. НАСТРАИВАЕМ ПОВЕДЕНИЕ МОКОВ под новые типы доменных команд и фильтр
-    // Наш новый фильтр идемпотентности должен пропустить уникальный пакет
-    Mockito.when(idempotencyServiceMock.tryAcquireLock(eq(PlatformType.TELEGRAM), eq(String.valueOf(mockUpdateId))))
-        .thenReturn(true);
 
     Mockito.doNothing().when(bookingServiceMock).processMessage(any(ProcessMessageCommand.class));
     Mockito.when(aiAssistantServiceMock.processChat(any(ProcessMessageCommand.class)))
@@ -175,12 +170,10 @@ class WebhookControllerAvajeClientTest {
         .asString();
 
     // Assert
-    // FIX: Возвращаем 204 No Content для успешного void-контроллера, как вы и указали!
-    assertEquals(204, response.statusCode(),
-        "Void controller endpoints should cleanly return a 204 No Content response code.");
+    assertEquals(200, response.statusCode(),
+        "Void controller endpoints should cleanly return a 200 OK.");
 
     // Верифицируем сквозное прохождение конвейера сетевой защиты и доменных служб
-    verify(idempotencyServiceMock, times(1)).tryAcquireLock(eq(PlatformType.TELEGRAM), eq(String.valueOf(mockUpdateId)));
     verify(bookingServiceMock, times(1)).processMessage(any(ProcessMessageCommand.class));
     verify(aiAssistantServiceMock, times(1)).processChat(any(ProcessMessageCommand.class));
 
@@ -205,10 +198,9 @@ class WebhookControllerAvajeClientTest {
     long duplicateUpdateId = 876543210L;
     String expectedPlatformId = "12345678";
 
-    // 1. Имитируем поведение для повторного пакета:
-    // Использовать этот Arrange, если метод возвращает void/выбрасывает исключение при дубликатах:
-    Mockito.doThrow(new IntegrityViolationException("Duplicate key slot"))
-        .when(idempotencyServiceMock).tryAcquireLock(eq(PlatformType.TELEGRAM), eq(String.valueOf(duplicateUpdateId)));
+    // 1. Имитируем поведение для повторного пакета при вызове bookingService.processMessage:
+    Mockito.doThrow(new MessageIdempotencyException("Duplicate message detected"))
+        .when(bookingServiceMock).processMessage(any(ProcessMessageCommand.class));
 
     // СОБИРАЕМ ТОЧНЫЙ ДУБЛИКАТ ТАЛОНА ЗАПРОСА
     TelegramUpdateDto duplicateTelegramUpdate = new TelegramUpdateDto(
@@ -234,9 +226,8 @@ class WebhookControllerAvajeClientTest {
     assertEquals(200, response.statusCode(),
         "Duplicate webhooks must be short-circuited with a clean 200 OK response code.");
 
-    // ИЗОЛЯЦИЯ: Гарантируем, что фильтр сработал как замок, и домен/ИИ вообще не вызывались!
-    verify(idempotencyServiceMock, times(1)).tryAcquireLock(eq(PlatformType.TELEGRAM), eq(String.valueOf(duplicateUpdateId)));
-    verify(bookingServiceMock, never()).processMessage(any(ProcessMessageCommand.class));
+    // ИЗОЛЯЦИЯ: Гарантируем, что сработала проверка, и ИИ вообще не вызывался!
+    verify(bookingServiceMock, times(1)).processMessage(any(ProcessMessageCommand.class));
     verify(aiAssistantServiceMock, never()).processChat(any(ProcessMessageCommand.class));
     verify(notificationServiceMock, never()).sendResponse(anyString(), anyString());
   }
@@ -250,11 +241,6 @@ class WebhookControllerAvajeClientTest {
     final String mockAiReply = "Пожалуйста, выберите мастера...";
     final String expectedPlatformId = "12345678";
     final String mockUpdateId = "876543210";
-
-    // ШАГ 1: Настраиваем поведение нового сетевого предохранителя идемпотентности
-    // Фильтр обязан пропустить этот оригинальный пакет как первый и уникальный
-    Mockito.when(idempotencyServiceMock.tryAcquireLock(eq(PlatformType.TELEGRAM), eq(mockUpdateId)))
-        .thenReturn(true);
 
     Mockito.doNothing().when(bookingServiceMock).processMessage(any(ProcessMessageCommand.class));
     Mockito.when(aiAssistantServiceMock.processChat(any(ProcessMessageCommand.class)))
@@ -295,11 +281,10 @@ class WebhookControllerAvajeClientTest {
 
     // Assert
     // Во фреймворке Avaje HTTP методы контроллеров с типом возвращаемого значения void обязаны возвращать 204
-    assertEquals(204, response.statusCode(),
-        "Void controller endpoints should cleanly return a 204 No Content response code.");
+    assertEquals(200, response.statusCode(),
+        "Void controller endpoints should cleanly return a 200.");
 
-    // Верифицируем, что сетевой фильтр, бизнес-слой и ИИ получили корректные вызовы
-    verify(idempotencyServiceMock, times(1)).tryAcquireLock(eq(PlatformType.TELEGRAM), eq(mockUpdateId));
+    // Верифицируем, что бизнес-слой и ИИ получили корректные вызовы
     verify(bookingServiceMock, times(1)).processMessage(any(ProcessMessageCommand.class));
     verify(aiAssistantServiceMock, times(1)).processChat(any(ProcessMessageCommand.class));
 
@@ -347,8 +332,8 @@ class WebhookControllerAvajeClientTest {
 
     // Имитируем падение СУБД: замок идемпотентности выбрасывает инфраструктурное исключение
     Mockito.doThrow(new StorageInfrastructureException("Database connection timeout or crash"))
-        .when(idempotencyServiceMock)
-        .tryAcquireLock(eq(PlatformType.TELEGRAM), eq(String.valueOf(mockUpdateId)));
+        .when(bookingServiceMock)
+        .processMessage(any(ProcessMessageCommand.class));
 
     // СОБИРАЕМ ВАЛИДНЫЙ СЕТЕВОЙ ПАКЕТ TELEGRAM
     TelegramUpdateDto genuineTelegramUpdate = new TelegramUpdateDto(
@@ -375,7 +360,7 @@ class WebhookControllerAvajeClientTest {
         "The system must return a 503 Service Unavailable status when the persistence layer drops.");
 
     // 2. Доменный контроллер и ИИ гарантированно изолированы от упавшей БД
-    verify(bookingServiceMock, never()).processMessage(any(ProcessMessageCommand.class));
+    verify(bookingServiceMock, times(1)).processMessage(any(ProcessMessageCommand.class));
     verify(aiAssistantServiceMock, never()).processChat(any(ProcessMessageCommand.class));
 
     // 3. ЖЕЛЕЗНЫЙ UX: Верифицируем, что клиенту улетело вежливое экстренное сообщение в чат мессенджера

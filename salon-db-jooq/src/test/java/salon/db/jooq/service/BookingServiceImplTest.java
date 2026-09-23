@@ -2,6 +2,7 @@ package salon.db.jooq.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrowsExactly;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static salon.db.jooq.generated.Tables.APPOINTMENTS;
 import static salon.db.jooq.generated.Tables.CLIENTS;
@@ -19,12 +20,15 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
+import java.util.UUID;
 import org.jooq.DSLContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.slf4j.MDC;
+import salon.api.exception.MasterUnavailableException;
+import salon.api.exception.ServiceNotFoundException;
 import salon.api.model.Appointment;
 import salon.api.model.AppointmentStatus;
 import salon.api.model.Master;
@@ -111,8 +115,9 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldAutoCreateClientAndLogTraceWhenNewDiscovered() {
+    MDC.put("traceId", "TX-TEST1-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
     ProcessMessageCommand command = new ProcessMessageCommand(
-        "TX-BOOK-101", PlatformType.TELEGRAM, "55512345", "Natalia", "Хочу записаться"
+        "TX-BOOK-101", PlatformType.TELEGRAM, "55512345", "1001", "Natalia", "Хочу записаться"
     );
 
     bookingService.processMessage(command);
@@ -136,13 +141,14 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldReuseExistingProfileOnSubsequentRequests() {
+    MDC.put("traceId", "TX-TEST2-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
     // Arrange: Используем новый уникальный идентификатор платформы, отличный от базового
     String recurringPlatformId = "TG-777777";
     ProcessMessageCommand command1 = new ProcessMessageCommand(
-        "TRACE-101", PlatformType.TELEGRAM, recurringPlatformId, "Viktoria", "Первое обращение клиента"
+        "TRACE-101", PlatformType.TELEGRAM, recurringPlatformId, "2001", "Viktoria", "Первое обращение клиента"
     );
     ProcessMessageCommand command2 = new ProcessMessageCommand(
-        "TRACE-102", PlatformType.TELEGRAM, recurringPlatformId, "Viktoria", "Повторное обращение в чат"
+        "TRACE-102", PlatformType.TELEGRAM, recurringPlatformId, "2002", "Viktoria", "Повторное обращение в чат"
     );
 
     // Act: Прокатываем обе команды через сервис по очереди
@@ -168,16 +174,17 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldMaintainStrictIsolationBetweenDistinctAccounts() {
+    MDC.put("traceId", "TX-TEST3-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
     // Arrange: Конструируем две раздельные команды для новых пользователей мессенджера
     String customerAPlatformId = "TG-111111";
     String customerBPlatformId = "TG-222222";
 
     ProcessMessageCommand commandA = new ProcessMessageCommand(
-        "TRACE-001", PlatformType.TELEGRAM, customerAPlatformId, "Alice", "Хочу записаться на окрашивание"
+        "TRACE-001", PlatformType.TELEGRAM, customerAPlatformId, "3001", "Alice", "Хочу записаться на окрашивание"
     );
 
     ProcessMessageCommand commandB = new ProcessMessageCommand(
-        "TRACE-002", PlatformType.TELEGRAM, customerBPlatformId, "Bob", "Здравствуйте, сколько стоит стрижка?"
+        "TRACE-002", PlatformType.TELEGRAM, customerBPlatformId, "3002", "Bob", "Здравствуйте, сколько стоит стрижка?"
     );
 
     // Act: Прогоняем обе команды через высокоуровневый доменный метод бизнес-логики
@@ -209,8 +216,9 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldFallbackToDefaultNameWhenFirstNameIsMissing() {
+    MDC.put("traceId", "TX-TEST4-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
     ProcessMessageCommand command = new ProcessMessageCommand(
-        "TX-BOOK-401", PlatformType.TELEGRAM, "777", null, "Привет от анонима"
+        "TX-BOOK-401", PlatformType.TELEGRAM, "777", "4001", null, "Привет от анонима"
     );
 
     bookingService.processMessage(command);
@@ -231,8 +239,9 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldLogTraceCleanlyEvenWhenMessageTextIsEmpty() {
+    MDC.put("traceId", "TX-TEST5-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
     ProcessMessageCommand command = new ProcessMessageCommand(
-        "TX-BOOK-501", PlatformType.TELEGRAM, "11111", "Natalia", ""
+        "TX-BOOK-501", PlatformType.TELEGRAM, "11111", "5001", "Natalia", ""
     );
 
     bookingService.processMessage(command);
@@ -250,6 +259,7 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldReturnOnlyActiveStylistsWhenQueried() {
+    MDC.put("traceId", "TX-TEST6-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
     // Arrange: Настраиваем временную точку запроса
     LocalDateTime targetDate = LocalDateTime.parse("2026-08-10T12:00:00");
 
@@ -306,6 +316,7 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldSuccessfullyCreateProvisionBookingWhenSlotIsFree() {
+    MDC.put("traceId", "TX-TEST7-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
     // Arrange: Настраиваем допуск по квалификации и публикуем рабочую смену мастера
     dslCtx.insertInto(MASTER_SERVICES)
         .set(MASTER_SERVICES.MASTER_ID, surrogateMasterId)
@@ -321,14 +332,13 @@ public class BookingServiceImplTest {
     LocalDateTime bookingTime = testDate.atTime(14, 0);
 
     // Act: Вызываем метод с использованием исключительно бесцифровых строковых бизнес-ключей
-    Optional<Appointment> appointmentOpt = bookingService.tryAiBooking(
+    Appointment appointment = bookingService.tryAiBooking(
         clientPlatformId, masterAlias, targetServiceName, bookingTime
     );
 
     // Assert: Верифицируем успешность прохождения транзакции и маппинга данных
-    assertTrue(appointmentOpt.isPresent(), "Запись должна быть успешно зафиксирована на свободном слоте.");
+    assertNotNull(appointment, "Запись должна быть успешно зафиксирована на свободном слоте.");
 
-    Appointment appointment = appointmentOpt.get();
     assertNotNull(appointment.ticketCode(), "Система обязана сгенерировать уникальный публичный TICKET_CODE визита.");
     assertTrue(appointment.ticketCode().startsWith("SB-"), "Код билета должен соответствовать официальному префиксу салона.");
 
@@ -349,6 +359,7 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldReturnEmptyOptionalWhenAiBookingClashesWithExistingAppointment() {
+    MDC.put("traceId", "TX-TEST8-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
     // Arrange: Задаем допуски мастера к обеим услугам и открываем смену
     dslCtx.insertInto(MASTER_SERVICES)
         .set(MASTER_SERVICES.MASTER_ID, surrogateMasterId)
@@ -378,12 +389,10 @@ public class BookingServiceImplTest {
         .execute();
 
     // Act: Пытаемся вклинить второго клиента на время 14:30 (явное пересечение интервалов)
-    Optional<Appointment> result = bookingService.tryAiBooking(
-        clientPlatformId, masterAlias, clashingServiceName, testDate.atTime(14, 30)
-    );
-
     // Assert
-    assertTrue(result.isEmpty(), "Система обязана отвергнуть бронь визита из-за пересечения с существующим клиентом.");
+    assertThrowsExactly(MasterUnavailableException.class, () -> bookingService.tryAiBooking(
+        clientPlatformId, masterAlias, clashingServiceName, testDate.atTime(14, 30)
+    ), "Система обязана отвергнуть бронь визита из-за пересечения с существующим клиентом.");
   }
 
   /**
@@ -395,6 +404,7 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldTransitionStatusToConfirmedWhenApprovedByOwner() {
+    MDC.put("traceId", "TX-TEST9-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
     // Arrange: Настраиваем допуск квалификации
     dslCtx.insertInto(MASTER_SERVICES).set(MASTER_SERVICES.MASTER_ID, surrogateMasterId).set(MASTER_SERVICES.SERVICE_ID, surrogateServiceId).execute();
 
@@ -417,12 +427,10 @@ public class BookingServiceImplTest {
         .execute();
 
     // Act: Клиент пытается записаться на 13:30 (в самый разгар обеда мастера)
-    Optional<Appointment> result = bookingService.tryAiBooking(
-        clientPlatformId, masterAlias, targetServiceName, testDate.atTime(13, 30)
-    );
-
     // Assert
-    assertTrue(result.isEmpty(), "Операция должна быть заблокирована: время зарезервировано под отдых сотрудника.");
+    assertThrowsExactly(MasterUnavailableException.class, () -> bookingService.tryAiBooking(
+        clientPlatformId, masterAlias, targetServiceName, testDate.atTime(13, 30)
+    ), "Операция должна быть заблокирована: время зарезервировано под отдых сотрудника.");
   }
 
   /**
@@ -433,6 +441,7 @@ public class BookingServiceImplTest {
    */
   @Test
   void shouldReturnEmptyOptionalWhenMasterLacksServiceCompetence() {
+    MDC.put("traceId", "TX-TEST10-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
     // Arrange: Публикуем смену, но УМЫШЛЕННО НЕ добавляем запись допуска в MASTER_SERVICES
     dslCtx.insertInto(MASTER_SHIFTS)
         .set(MASTER_SHIFTS.MASTER_ID, surrogateMasterId)
@@ -441,11 +450,57 @@ public class BookingServiceImplTest {
         .execute();
 
     // Act: Пытаемся записать клиента на услугу, к которой у мастера нет допуска
-    Optional<Appointment> result = bookingService.tryAiBooking(
+    // Assert
+    assertThrowsExactly(MasterUnavailableException.class, () -> bookingService.tryAiBooking(
         clientPlatformId, masterAlias, targetServiceName, testDate.atTime(14, 0)
+    ), "Система должна вернуть Optional.empty(), так как мастер не имеет квалификации для этой услуги.");
+  }
+
+  /**
+   * <h3>Тест 11: генерация ServiceNotFoundException при невалидных текстовых ключах</h3>
+   *
+   * <p><b>Что дано (Given):</b>
+   * База данных СУБД (H2 в памяти) сидирована профилем клиента Natalia и профилем мастера
+   * elena_colorist. Однако, в каталоге услуг СЕЙЧАС ПОЛНОСТЬЮ ОТСУТСТВУЕТ запись
+   * с наименованием "Несуществующая услуга".</p>
+   *
+   * <p><b>Какое действие выполняется (When):</b>
+   * Вызывается доменный метод {@code tryAiBooking} с передачей невалидного текстового ключа услуги.</p>
+   *
+   * <p><b>Что проверяется (Then):</b>
+   * Инфраструктурный слой jOOQ обязан запустить атомарный кросс-маппинг. Так как кортеж
+   * пересечения не соберется (ctxRecord == null), метод обязан:
+   * <ul>
+   *   <li>Выбросить строго доменное исключение {@link ServiceNotFoundException}.</li>
+   *   <li>НЕ создавать никаких записей в таблице {@code APPOINTMENTS}.</li>
+   *   <li>Полностью прервать транзакционный контекст без утечки сырых SQL-ошибок.</li>
+   * </ul>
+   * </p>
+   */
+  @Test
+  @DisplayName("Сценарий: Выброс ServiceNotFoundException, если имя услуги отсутствует в каталоге СУБД")
+  void shouldThrowServiceNotFoundExceptionWhenServiceNameDoesNotExistInCatalog() {
+    MDC.put("traceId", "TX-TEST11-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
+    // Given: Настраиваем окружение и уникальные идентификаторы сессии
+    String testPlatformId = "telegram_chat_555";
+    String masterAlias = "elena_colorist";
+    String invalidServiceName = "Несуществующая услуга";
+    LocalDateTime targetTime = LocalDateTime.of(2026, 8, 25, 14, 30);
+
+    // Категорически НЕ вставляем запись в таблицу MASTER_SERVICES!
+    // Это гарантирует, что crossJoin вернет пустой результат (ctxRecord == null).
+
+    // When & Then: Проверяем атомарный выброс нашего доменного исключения
+    ServiceNotFoundException exception = assertThrowsExactly(ServiceNotFoundException.class, () ->
+            bookingService.tryAiBooking(testPlatformId, masterAlias, invalidServiceName, targetTime),
+        "Метод обязан выбросить ServiceNotFoundException при отсутствии услуги в СУБД."
     );
 
-    // Assert
-    assertTrue(result.isEmpty(), "Система должна вернуть Optional.empty(), так как мастер не имеет квалификации для этой услуги.");
+    // Дополнительный аудит: верифицируем понятное сообщение для логирования
+    assertTrue(exception.getMessage().contains("Услуга или мастер не найдены в каталоге"));
+
+    // Железная проверка на отсутствие сайд-эффектов: таблица записей должна оставаться чистой
+    int appointmentsCount = dslCtx.fetchCount(APPOINTMENTS);
+    assertEquals(0, appointmentsCount, "В таблице APPOINTMENTS не должно появиться записей при сбое маппинга.");
   }
 }

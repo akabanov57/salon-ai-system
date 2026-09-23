@@ -9,6 +9,8 @@ import java.time.LocalTime;
 import java.util.List;
 import java.util.Optional;
 import salon.ai.engine.internal.service.DateTimeParser;
+import salon.api.exception.MasterUnavailableException;
+import salon.api.exception.ServiceNotFoundException;
 import salon.api.model.Appointment;
 import salon.api.model.CatalogService;
 import salon.api.model.DialogueContext;
@@ -311,21 +313,34 @@ final class SalonStateMachineService {
     }
     CatalogService targetService = services.getFirst();
 
-    Optional<Appointment> app = bookingService.tryAiBooking(ctx.metadata().userId(),
-        ctx.slots().stylist(), targetService.name(), targetDateTime);
-    if (app.isPresent()) {
-      DialogueContext.Slots confirmed = new DialogueContext.Slots(targetService.name(),
-          ctx.slots().stylist(), ctx.slots().datetimeRaw(), app.get().appointmentTime().toString());
-      return Optional.of(
-          new DialogueResponse(ctx.withSlots(confirmed).withState(DialogueState.CONFIRMATION_PENDING),
-              String.format(
-                  "Отлично! Я зарезервировал время %s к мастеру %s. Подтверждаете запись?",
-                  targetDateTime.toLocalTime(), ctx.slots().stylist())));
-    }
+    try {
+      //  ФИКС: Вызываем метод напрямую, ожидая чистый не-null объект Appointment
+      final Appointment app = bookingService.tryAiBooking(
+          ctx.metadata().userId(), ctx.slots().stylist(), targetService.name(), targetDateTime
+      );
 
-    return Optional.of(new DialogueResponse(ctx.withState(DialogueState.AVAILABILITY_MATCH),
-        String.format("Извините, время %s у мастера %s уже занято. Можем подобрать другое время?",
-            targetDateTime.toLocalTime(), ctx.slots().stylist())));
+      final DialogueContext.Slots confirmed = new DialogueContext.Slots(
+          targetService.name(),
+          ctx.slots().stylist(),
+          ctx.slots().datetimeRaw(),
+          app.appointmentTime().toString()
+      );
+
+      return Optional.of(new DialogueResponse(ctx.withSlots(confirmed).withState(DialogueState.CONFIRMATION_PENDING),
+          String.format("Отлично! Я зарезервировал время %s к мастеру %s. Подтверждаете запись?",
+              targetDateTime.toLocalTime(), ctx.slots().stylist())));
+
+    } catch (MasterUnavailableException ex) {
+      // Мягко перехватываем бизнес-ошибку занятости слота и просим выбрать другое время
+      return Optional.of(new DialogueResponse(ctx.withState(DialogueState.AVAILABILITY_MATCH),
+          String.format("Извините, время %s у мастера %s уже занято. Можем подобрать другое время?",
+              targetDateTime.toLocalTime(), ctx.slots().stylist())));
+
+    } catch (ServiceNotFoundException ex) {
+      // Мягко откатываем пользователя на выбор услуги, если маппинг сорвался
+      return Optional.of(new DialogueResponse(ctx.withSlots(clearServiceSlot(ctx)).withState(DialogueState.SERVICE_SELECTION),
+          "Произошла ошибка согласования услуги. Какая именно бьюти-процедура вас интересует?"));
+    }
   }
 
   private DialogueContext.Slots clearServiceSlot(DialogueContext ctx) {

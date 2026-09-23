@@ -4,7 +4,6 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.List;
-import java.util.Optional;
 import salon.api.model.Appointment;
 import salon.api.model.CatalogService;
 import salon.api.model.Master;
@@ -34,7 +33,7 @@ public interface BookingService {
    * @param appointmentTime Целевое время начала сеанса визита
    * @return Доменный объект записи визита в статусе AI_PENDING в случае успешного бронирования
    */
-  Optional<Appointment> tryAiBooking(
+  Appointment tryAiBooking(
       String platformId,
       String masterAlias,
       String serviceName,

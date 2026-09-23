@@ -33,6 +33,7 @@ import org.mockito.Mockito;
 import salon.ai.engine.internal.service.DateTimeParser;
 import salon.ai.engine.internal.service.LowLevelAiService;
 import salon.api.exception.AiEngineException;
+import salon.api.exception.ServiceNotFoundException;
 import salon.api.exception.StorageInfrastructureException;
 import salon.api.model.Appointment;
 import salon.api.model.AppointmentStatus;
@@ -133,6 +134,7 @@ class AiAssistantServiceImplTest {
         traceId,
         testPlatformType,
         testPlatformId,
+        "10001",
         "Guest",
         "Отмени всё, пожалуйста"
     );
@@ -171,8 +173,7 @@ class AiAssistantServiceImplTest {
    * </p>
    * <p>
    * <b>Что проверяется (Then):</b> Оркестратор обязан перехватить внутреннее исключение базы
-   * данных
-   * внутри виртуального потока, подавить технические детали и выбросить контролируемый
+   * данных внутри виртуального потока, подавить технические детали и выбросить контролируемый
    * верхнеуровневый доменное исключение {@link AiEngineException}.
    * </p>
    */
@@ -184,6 +185,7 @@ class AiAssistantServiceImplTest {
         traceId,
         testPlatformType,
         testPlatformId,
+        "10002",
         "Guest",
         "Привет"
     );
@@ -229,7 +231,7 @@ class AiAssistantServiceImplTest {
     // ТУР №1: КЛИЕНТ ЗАПРАШИВАЕТ ТОЧНУЮ УСЛУГУ НА ЗАВТРА К 14:00 (СТРОГОЕ СОВПАДЕНИЕ)
     // =================================================================================
     ProcessMessageCommand turn1Command = new ProcessMessageCommand(
-        traceId, testPlatformType, testPlatformId, "Guest",
+        traceId, testPlatformType, testPlatformId, "20001", "Guest",
         "Хочу записаться на Мужская стрижка завтра к 14:00"
     );
 
@@ -238,7 +240,8 @@ class AiAssistantServiceImplTest {
 
     LlamaResponse turn1Llama = new LlamaResponse("book_appointment",
         new LlamaResponse.Slots("Мужская стрижка", null, "завтра в 14:00"));
-    when(lowLevelAiServiceMock.extractIntentAndSlots("Хочу записаться на Мужская стрижка завтра к 14:00"))
+    when(lowLevelAiServiceMock.extractIntentAndSlots(
+        "Хочу записаться на Мужская стрижка завтра к 14:00"))
         .thenReturn(turn1Llama);
 
     // ИСПРАВЛЕНО: Защищаем пулл виртуальных потоков от промахов Mockito по строковым ключам
@@ -258,7 +261,8 @@ class AiAssistantServiceImplTest {
     String reply1 = aiAssistantService.processChat(turn1Command);
 
     assertNotNull(reply1);
-    assertTrue(reply1.contains("elena_colorist"), "Ответ обязан содержать псевдоним доступного мастера");
+    assertTrue(reply1.contains("elena_colorist"),
+        "Ответ обязан содержать псевдоним доступного мастера");
     assertTrue(reply1.contains("Кто вам больше подходит?"));
 
     verify(chatMemoryMock, times(1)).saveContext(eq(testPlatformType), eq(testPlatformId),
@@ -273,7 +277,7 @@ class AiAssistantServiceImplTest {
     // ТУР №2: КЛИЕНТ ОТВЕЧАЕТ - "ДАВАЙТЕ К ЕЛЕНЕ"
     // =================================================================================
     ProcessMessageCommand turn2Command = new ProcessMessageCommand(
-        traceId, testPlatformType, testPlatformId, "Guest", "Давайте к елене"
+        traceId, testPlatformType, testPlatformId, "20002", "Guest", "Давайте к елене"
     );
 
     reset(chatMemoryMock);
@@ -297,7 +301,7 @@ class AiAssistantServiceImplTest {
     );
     when(bookingServiceMock.tryAiBooking(testPlatformId, "elena_colorist", "Мужская стрижка",
         appointmentDateTime))
-        .thenReturn(Optional.of(mockAppointment));
+        .thenReturn(mockAppointment);
 
     // Выполняем Тур 2
     String reply2 = aiAssistantService.processChat(turn2Command);
@@ -306,7 +310,8 @@ class AiAssistantServiceImplTest {
     assertTrue(reply2.contains("elena_colorist"));
     assertTrue(reply2.contains("Подтверждаете запись?"));
 
-    ArgumentCaptor<DialogueContext> finalContextCaptor = ArgumentCaptor.forClass(DialogueContext.class);
+    ArgumentCaptor<DialogueContext> finalContextCaptor = ArgumentCaptor.forClass(
+        DialogueContext.class);
     verify(chatMemoryMock, times(1)).saveContext(eq(testPlatformType), eq(testPlatformId),
         finalContextCaptor.capture());
     DialogueContext finalContext = finalContextCaptor.getValue();
@@ -317,26 +322,32 @@ class AiAssistantServiceImplTest {
   }
 
   /**
-   * <h3>Тест под Раздел 2 Справочника: Неявная контекстная амбивалентность (Implicit String Mismatch)</h3>
+   * <h3>Тест под Раздел 2 Справочника: Неявная контекстная амбивалентность (Implicit String
+   * Mismatch)</h3>
    *
    * <p><b>Что дано (Given):</b>
-   * Пользователь пишет общее слово {@code "стрижка"}. В базе заведена всего одна услуга,
-   * но её название длиннее и детальнее — {@code "Женская стрижка модельная"}.
-   * Размер возвращаемого списка равен 1, но точного совпадения строк нет (isExactMatch == false).</p>
+   * Пользователь пишет общее слово {@code "стрижка"}. В базе заведена всего одна услуга, но её
+   * название длиннее и детальнее — {@code "Женская стрижка модельная"}. Размер возвращаемого списка
+   * равен 1, но точного совпадения строк нет (isExactMatch == false).</p>
    *
    * <p><b>Какое действие выполняется (When):</b>
    * Команда с текстом передается на вход оркестратору.</p>
    *
    * <p><b>Что проверяется (Then):</b>
-   * Система ОБЯЗАНА автоматически нормализовать имя услуги, подставив официальное
-   * значение из СУБД, и продвинуть диалог вперед в состояние {@code AVAILABILITY_MATCH}.</p>
+   * Система ОБЯЗАНА автоматически нормализовать имя услуги, подставив официальное значение из СУБД,
+   * и продвинуть диалог вперед в состояние {@code AVAILABILITY_MATCH}.</p>
    */
   @Test
   @DisplayName("Сценарий 4: Перехват неявной контекстной амбивалентности при частичном совпадении строк")
   void shouldInterceptImplicitAmbiguityWhenServiceFoundButNameIsNotExactMatch() {
     // Given
     ProcessMessageCommand command = new ProcessMessageCommand(
-        traceId, testPlatformType, testPlatformId, "Guest", "Хочу записаться на стрижку"
+        traceId,
+        testPlatformType,
+        testPlatformId,
+        "30001",
+        "Guest",
+        "Хочу записаться на стрижку"
     );
 
     when(chatMemoryMock.findContextByClientId(testPlatformType, testPlatformId))
@@ -358,33 +369,39 @@ class AiAssistantServiceImplTest {
 
     // Then: Верифицируем, что система перешла к подбору окон для нормализованной услуги
     assertNotNull(reply);
-    assertTrue(reply.contains("Женская стрижка модельная"), "Ответ должен содержать нормализованное имя услуги");
-    assertTrue(reply.contains("На какой день и время вам подобрать свободные окна"), "Система должна продвинуться к шагу 2.5");
+    assertTrue(reply.contains("Женская стрижка модельная"),
+        "Ответ должен содержать нормализованное имя услуги");
+    assertTrue(reply.contains("На какой день и время вам подобрать свободные окна"),
+        "Система должна продвинуться к шагу 2.5");
 
     ArgumentCaptor<DialogueContext> contextCaptor = ArgumentCaptor.forClass(DialogueContext.class);
-    verify(chatMemoryMock, times(1)).saveContext(eq(testPlatformType), eq(testPlatformId), contextCaptor.capture());
+    verify(chatMemoryMock, times(1)).saveContext(eq(testPlatformType), eq(testPlatformId),
+        contextCaptor.capture());
     DialogueContext savedContext = contextCaptor.getValue();
 
-    assertEquals(DialogueState.AVAILABILITY_MATCH, savedContext.currentState(), "Стейт должен переключиться в AVAILABILITY_MATCH");
-    assertEquals("Женская стрижка модельная", savedContext.slots().service(), "Имя услуги должно перезаписаться в памяти СУБД");
+    assertEquals(DialogueState.AVAILABILITY_MATCH, savedContext.currentState(),
+        "Стейт должен переключиться в AVAILABILITY_MATCH");
+    assertEquals("Женская стрижка модельная", savedContext.slots().service(),
+        "Имя услуги должно перезаписаться в памяти СУБД");
   }
 
   /**
-   * <h3>Тест под Раздел 3 Справочника: Хронологическая (временная) амбивалентность (Chronological Ambiguity)</h3>
+   * <h3>Тест под Раздел 3 Справочника: Хронологическая (временная) амбивалентность (Chronological
+   * Ambiguity)</h3>
    *
    * <p><b>Что дано (Given):</b>
    * Пользователь хочет перенести или выбрать время, но пишет размытую фразу {@code "на попозже"}.
    * Наш жесткий {@code DateTimeParser} не может распарсить этот текст в фиксированный LocalDateTime
-   * и возвращает {@code Optional.empty()}. Модель Llama3.2 правильно определяет интент
-   * как {@code "change_datetime_ambiguous"}.</p>
+   * и возвращает {@code Optional.empty()}. Модель Llama3.2 правильно определяет интент как
+   * {@code "change_datetime_ambiguous"}.</p>
    *
    * <p><b>Какое действие выполняется (When):</b>
    * Команда передается оркестратору.</p>
    *
    * <p><b>Что проверяется (Then):</b>
    * Стейт-машина должна поймать этот интент на Шаге 5, перевести сессию в состояние
-   * {@code CLARIFY_INTENT} и выдать клиенту строгую системную инструкцию-вопрос для
-   * конкретизации временных границ.</p>
+   * {@code CLARIFY_INTENT} и выдать клиенту строгую системную инструкцию-вопрос для конкретизации
+   * временных границ.</p>
    */
   @Test
   @DisplayName("Сценарий 5: Перехват хронологической амбивалентности при размытом указании времени")
@@ -397,7 +414,12 @@ class AiAssistantServiceImplTest {
     );
 
     ProcessMessageCommand command = new ProcessMessageCommand(
-        traceId, testPlatformType, testPlatformId, "Guest", "Давайте перенесем на попозже"
+        traceId,
+        testPlatformType,
+        testPlatformId,
+        "40001",
+        "Guest",
+        "Давайте перенесем на попозже"
     );
 
     //  ФИКС: Используем точное доменное имя метода findContext вместо findContextByClientId!
@@ -422,13 +444,106 @@ class AiAssistantServiceImplTest {
 
     // Then: Теперь контекст извлечен правильно, стейт равен CONFIRMATION_PENDING, и Шаг 5 сработает!
     assertNotNull(reply);
-    assertTrue(reply.contains("Вы хотите выбрать другую дату для этой записи или полностью отменить её?"),
+    assertTrue(
+        reply.contains("Вы хотите выбрать другую дату для этой записи или полностью отменить её?"),
         "Ответ сервера должен содержать вопрос-уточнение о переносе или отмене визита");
 
     ArgumentCaptor<DialogueContext> contextCaptor = ArgumentCaptor.forClass(DialogueContext.class);
-    verify(chatMemoryMock, times(1)).saveContext(eq(testPlatformType), eq(testPlatformId), contextCaptor.capture());
+    verify(chatMemoryMock, times(1)).saveContext(eq(testPlatformType), eq(testPlatformId),
+        contextCaptor.capture());
     DialogueContext savedContext = contextCaptor.getValue();
 
-    assertEquals(DialogueState.CLARIFY_INTENT, savedContext.currentState(), "Система должна зайти в буфер CLARIFY_INTENT");
+    assertEquals(DialogueState.CLARIFY_INTENT, savedContext.currentState(),
+        "Система должна зайти в буфер CLARIFY_INTENT");
+  }
+
+  /**
+   * <h3>Тест перехвата ServiceNotFoundException на этапе финального Fast-Track бронирования</h3>
+   *
+   * <p><b>Что дано (Given):</b>
+   * Все слоты (услуга, мастер, время) заполнены. Но при вызове СУБД-метода {@code tryAiBooking}
+   * база данных выбрасывает исключение {@link ServiceNotFoundException} (например, услуга была
+   * удалена из прейскуранта прямо во время диалога).</p>
+   *
+   * <p><b>Какое действие выполняется (When):</b>
+   * Текст-команда от пользователя передается оркестратору.</p>
+   *
+   * <p><b>Что проверяется (Then):</b>
+   * Архитектурный контур обязан обработать это доменное исключение:
+   * <ul>
+   *   <li>НЕ выбрасывать общую ошибку сервера.</li>
+   *   <li>Мягко вернуть текст: <i>"Произошла ошибка согласования услуги..."</i>.</li>
+   *   <li>Очистить слот услуги в {@code null} через хелпер {@code clearServiceSlot}.</li>
+   *   <li>Перевести диалоговую сессию обратно в состояние {@code SERVICE_SELECTION}.</li>
+   * </ul>
+   * </p>
+   */
+  @Test
+  @DisplayName("Сценарий: Мягкий откат в SERVICE_SELECTION при выбросе ServiceNotFoundException из СУБД")
+  void shouldRollbackToServiceSelectionWhenServiceNotFoundExceptionThrownDuringBooking() {
+    LocalDate tomorrow = LocalDate.now().plusDays(1);
+    LocalTime targetTime = LocalTime.of(14, 0);
+    LocalDateTime appointmentDateTime = LocalDateTime.of(tomorrow, targetTime);
+
+    DialogueContext existingContext = new DialogueContext(
+        DialogueState.STYLIST_PREFERENCE,
+        new DialogueContext.Slots("Мужская стрижка", "elena_colorist", "завтра в 14:00", null),
+        new DialogueContext.Metadata(3, 0, testPlatformId)
+    );
+
+    ProcessMessageCommand command = new ProcessMessageCommand(
+        traceId,
+        testPlatformType,
+        testPlatformId,
+        "4002",
+        "Guest",
+        "Да, подтверждаю запись"
+    );
+
+    when(chatMemoryMock.findContextByClientId(testPlatformType, testPlatformId))
+        .thenReturn(Optional.of(existingContext));
+
+    LlamaResponse mockLlamaResponse = new LlamaResponse("book_appointment",
+        new LlamaResponse.Slots(null, null, null));
+    when(lowLevelAiServiceMock.extractIntentAndSlots(anyString()))
+        .thenReturn(mockLlamaResponse);
+
+    when(datetimeParser.parseRaw(anyString())).thenReturn(Optional.of(appointmentDateTime));
+
+    List<CatalogService> serviceCatalog = List.of(
+        new CatalogService("Мужская стрижка", 45, BigDecimal.valueOf(1500.0))
+    );
+    when(bookingServiceMock.searchServicesInCatalog(anyString())).thenReturn(serviceCatalog);
+
+    //  ФИКС: Мокаем расписание смен, чтобы пройти валидацию Step 3 (validateMasterSchedule)
+    List<Master> freeMasters = List.of(
+        new Master("elena_colorist", "Елена", "Иванова", "Top Colorist")
+    );
+    when(bookingServiceMock.getAvailableMastersForServiceInterval(anyString(), any(), any(), any()))
+        .thenReturn(freeMasters);
+
+    // Моделируем исключение: Слой СУБД выбрасывает ServiceNotFoundException вместо возврата Appointment
+    when(bookingServiceMock.tryAiBooking(eq(testPlatformId), eq("elena_colorist"),
+        eq("Мужская стрижка"), eq(appointmentDateTime)))
+        .thenThrow(new ServiceNotFoundException("Услуга не найдена в каталоге СУБД"));
+
+    // When: Выполняем шаг оркестрации
+    String reply = aiAssistantService.processChat(command);
+
+    // Then: Верифицируем мягкую реакцию интерфейса
+    assertNotNull(reply);
+    assertTrue(reply.contains("Произошла ошибка согласования услуги"),
+        "Пользователь должен увидеть сообщение об ошибке маппинга");
+    assertTrue(reply.contains("Какая именно бьюти-процедура вас интересует"),
+        "Ассистент должен мягко попросить выбрать услугу заново");
+
+    ArgumentCaptor<DialogueContext> contextCaptor = ArgumentCaptor.forClass(DialogueContext.class);
+    verify(chatMemoryMock, times(1)).saveContext(eq(testPlatformType), eq(testPlatformId),
+        contextCaptor.capture());
+    DialogueContext savedContext = contextCaptor.getValue();
+
+    assertEquals(DialogueState.SERVICE_SELECTION, savedContext.currentState());
+    assertNull(savedContext.slots().service());
+    assertEquals("elena_colorist", savedContext.slots().stylist());
   }
 }

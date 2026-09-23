@@ -4,6 +4,7 @@ import static org.jooq.impl.DSL.localDateTimeAdd;
 import static org.jooq.impl.DSL.upper;
 import static salon.db.jooq.generated.Tables.APPOINTMENTS;
 import static salon.db.jooq.generated.Tables.CLIENTS;
+import static salon.db.jooq.generated.Tables.INBOUND_EVENTS;
 import static salon.db.jooq.generated.Tables.MASTERS;
 import static salon.db.jooq.generated.Tables.MASTER_SERVICES;
 import static salon.db.jooq.generated.Tables.MASTER_SHIFTS;
@@ -21,15 +22,18 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.UUID;
 import org.jooq.DSLContext;
 import org.jooq.DatePart;
 import org.jooq.exception.DataAccessException;
+import org.jooq.exception.IntegrityConstraintViolationException;
 import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import salon.api.exception.IntegrityViolationException;
+import salon.api.exception.MasterUnavailableException;
+import salon.api.exception.MessageIdempotencyException;
+import salon.api.exception.ServiceNotFoundException;
 import salon.api.exception.StorageInfrastructureException;
 import salon.api.model.Appointment;
 import salon.api.model.AppointmentStatus;
@@ -124,36 +128,48 @@ final class BookingServiceImpl implements BookingService {
 
   @Override
   public void processMessage(@Valid ProcessMessageCommand command) {
-    log.debug("[Domain Use-Case] Начат цикл обработки обращения для платформы {} (ID: {})",
-        command.platformType(), command.platformId());
+    log.debug("[Domain Use-Case] Начат цикл обработки обращения для платформы {} (ID: {}, MsgID: {})",
+        command.platformType(), command.platformId(), command.messengerMessageId());
 
     try {
       dslCtx.transaction(configuration -> {
         DSLContext txCtx = configuration.dsl();
 
-        // 1. Атомарно идентифицируем или создаем клиента, получая внутренний числовой ID для транзакции (Шаг А)
+        // 1. Атомарно захватываем уникальный сетевой замок в таблице INBOUND_EVENTS
+        try {
+          txCtx.insertInto(INBOUND_EVENTS)
+              .set(INBOUND_EVENTS.PLATFORM_TYPE, command.platformType().name())
+              .set(INBOUND_EVENTS.MESSENGER_MESSAGE_ID, command.messengerMessageId())
+              .execute();
+        } catch (IntegrityConstraintViolationException ex) {
+          // jOOQ гарантирует, что любая ошибка дубликата ключа (23505) попадет именно сюда
+          throw new MessageIdempotencyException("Обнаружен повторный пакет сообщения [Message ID: " + command.messengerMessageId() + "]", ex);
+        }
+
+        // 2. Идентифицируем или создаем клиента
         Long surrogateClientId = txIdOrCreateClientInternal(
             txCtx, command.platformType(), command.platformId(), command.displayName()
         );
 
-        // 2. Выполняем прямую вставку входящего лога в таблицу MESSAGE_TRACES в текущей транзакции
+        // 3. Выполняем прямую вставку входящего лога
         txCtx.insertInto(MESSAGE_TRACES)
             .set(MESSAGE_TRACES.TRACE_ID, command.traceId())
             .set(MESSAGE_TRACES.DIRECTION, "INBOUND")
             .set(MESSAGE_TRACES.MESSAGE_TEXT, command.messageText())
-            .set(MESSAGE_TRACES.CLIENT_ID, surrogateClientId) // Чистый внутренний ключ связывания без утечки наружу
+            .set(MESSAGE_TRACES.CLIENT_ID, surrogateClientId)
             .execute();
 
-        log.debug("[Domain Use-Case] Входящий лог транзакции {} успешно сохранен.",
-            command.traceId());
+        log.debug("[Domain Use-Case] Входящий лог транзакции {} успешно сохранен.", command.traceId());
       });
+    } catch (MessageIdempotencyException ex) {
+      throw ex; // Пробрасываем бизнес-исключение идемпотентности без изменений
     } catch (Exception ex) {
       throw translateException("Failed to identify or create multi-channel client profile", ex);
     }
   }
 
   @Override
-  public Optional<Appointment> tryAiBooking(String platformId, String masterAlias,
+  public Appointment tryAiBooking(String platformId, String masterAlias,
       String serviceName, LocalDateTime appointmentTime) {
 
     log.debug(
@@ -184,7 +200,7 @@ final class BookingServiceImpl implements BookingService {
         // Защитный барьер: если хотя бы одна бизнес-строка не найдена в таблицах — ИИ мгновенно получает отказ
         if (ctxRecord == null) {
           log.warn("[Key Resolution Mismatch] Transacted cross-mapping failed. Natural strings do not correspond to database entries.");
-          return Optional.empty();
+          throw new ServiceNotFoundException("Услуга или мастер не найдены в каталоге салона.");
         }
 
         final Long surrogateClientId = ctxRecord.get("SUB_CLIENT_ID", Long.class);
@@ -199,7 +215,7 @@ final class BookingServiceImpl implements BookingService {
 
         if (!isAvailable) {
           log.warn("[Booking Aborted] Target slot criteria checks failed for master alias [{}] at time [{}]", masterAlias, appointmentTime);
-          return Optional.empty();
+          throw new MasterUnavailableException("Выбранное время у этого мастера уже занято.");
         }
 
         // ШАГ 3: ГЕНЕРАЦИЯ ПУБЛИЧНОГО БИЗНЕС-КОДА БИЛЕТА (Вариант А)
@@ -218,10 +234,14 @@ final class BookingServiceImpl implements BookingService {
             .returning()
             .fetchOne();
 
-        Objects.requireNonNull(record, "Database runtime failed to yield persisted appointment sequence record proxy.");
+        //  ЯВНАЯ ДЕТЕРМИНИРОВАННАЯ ОБРАБОТКА NULL БЕЗ ИСПОЛЬЗОВАНИЯ NULL-POINTER-EXCEPTION
+        if (record == null) {
+          log.error("[Database Write Failure] Insert operation completed, but the database returned an empty record proxy for Ticket [{}]", generatedTicketCode);
+          throw new StorageInfrastructureException("Сбой инфраструктуры СУБД: не удалось зафиксировать талон бронирования в базе данных.");
+        }
 
         // Возвращаем наверх чистую доменную сущность, собранную исключительно на бизнес-ключах
-        return Optional.of(new Appointment(
+        return new Appointment(
             record.getTicketCode(),
             platformId,
             masterAlias,
@@ -231,8 +251,10 @@ final class BookingServiceImpl implements BookingService {
             record.getPrice(),
             record.getStatus(),
             record.getCreatedAt()
-        ));
+        );
       });
+    } catch (ServiceNotFoundException | MasterUnavailableException ex) {
+      throw ex; // Пробрасываем чистые доменные ошибки бизнес-логики без изменений
     } catch (Exception ex) {
       throw translateException("Critical failure wrapped inside natural-key allocation sequence processing", ex);
     }

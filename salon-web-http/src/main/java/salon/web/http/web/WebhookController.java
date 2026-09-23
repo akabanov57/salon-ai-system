@@ -6,12 +6,14 @@ import io.avaje.http.api.Path;
 import io.avaje.http.api.Post;
 import io.avaje.inject.External;
 import io.avaje.jex.http.Context;
+import io.avaje.jex.http.HttpStatus;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import salon.api.exception.AiEngineException;
 import salon.api.exception.IntegrityViolationException;
+import salon.api.exception.MessageIdempotencyException;
 import salon.api.exception.StorageInfrastructureException;
 import salon.api.model.PlatformType;
 import salon.api.model.ProcessMessageCommand;
@@ -156,7 +158,7 @@ public class WebhookController {
 
     // FIX: Construct the command object outside the try block so it is visible to all catch blocks!
     final ProcessMessageCommand domainCommand = new ProcessMessageCommand(
-        currentTraceId, platformType, rawPlatformId, rawDisplayName, rawText
+        currentTraceId, platformType, rawPlatformId, String.valueOf(payload.updateId()), rawDisplayName, rawText
     );
 
     try {
@@ -169,6 +171,11 @@ public class WebhookController {
       // FIX: Pass the clean domain command instead of raw strings!
       finalOutboundText = aiAssistantService.processChat(domainCommand);
 
+    } catch (MessageIdempotencyException idempotencyEx) {
+      log.warn("Network Boundary: Обнаружен сетевой дубликат [Update ID: {}]. Глушение запроса (200 OK).",
+          domainCommand.messengerMessageId());
+      ctx.status(HttpStatus.OK_200).text("");
+      return;
     } catch (IntegrityViolationException integrityEx) {
       // FIX: Concurrent request race condition recovery!
       // Thread B hit a collision because Thread A just successfully saved this client profile.
@@ -196,6 +203,7 @@ public class WebhookController {
       finalOutboundText = "Извините, в нашей системе записи произошел технический сбой. "
           + "Пожалуйста, повторите попытку через пару минут.";
 
+      ctx.status(HttpStatus.SERVICE_UNAVAILABLE_503).text("");
     } catch (AiEngineException aiEx) {
       // Database is perfectly fine, but the LLM/Ollama engine dropped or timed out
       log.error("Network Boundary: Generative AI Core Dropout [Trace: {}].", currentTraceId, aiEx);
@@ -236,6 +244,7 @@ public class WebhookController {
           "Network Boundary: Fatal edge delivery or logging block exception for Trace ID [{}]: {}",
           currentTraceId, deliveryEx.getMessage(), deliveryEx);
     }
+    ctx.status(HttpStatus.OK_200).text("");
   }
 
 }

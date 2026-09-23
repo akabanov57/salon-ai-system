@@ -211,7 +211,7 @@ public class SalonStateMachineServiceTest {
     );
 
     when(bookingService.tryAiBooking(testUserId, "elena_colorist", "Мужская стрижка", anchorDateTime))
-        .thenReturn(Optional.of(mockAppointment));
+        .thenReturn(mockAppointment);
 
     DialogueResponse response = stateMachineService.processTurn(llamaInput, context);
 
